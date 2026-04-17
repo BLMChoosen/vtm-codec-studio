@@ -162,7 +162,6 @@ class LogPanel(QWidget):
         header.addWidget(self._status_label)
 
         self._clear_btn = QPushButton("Clear")
-        self._clear_btn.setFixedWidth(70)
         self._clear_btn.clicked.connect(self.clear)
         header.addWidget(self._clear_btn)
         layout.addLayout(header)
