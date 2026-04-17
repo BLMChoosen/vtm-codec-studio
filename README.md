@@ -16,7 +16,7 @@ A modern desktop application for encoding and decoding **VVC (Versatile Video Co
 - **Progress Indicator** — Queue-aware progress estimation for encoder and decoder
 - **Execution Artifacts Folder (Encoder)** — Choose one base folder and automatically generate `reports/`, `tracefiles/`, and `metrics/`
 - **TXT Reports (Encoder)** — Save a full report (`.txt`) for each queue execution
-- **Tracefiles (Encoder)** — Save one trace file (`.trace.txt`) for each queue execution
+- **Tracefiles (Encoder)** — Save one VTM trace file (`.csv`) for each queue execution
 - **CSV Reports** — Save one CSV metrics file for each queue execution in Encoder, plus per-job CSV output in Decoder
 - **Preset System** — Save, load, and delete named encoder parameter presets
 - **Encode Queue** — Queue multiple encoding jobs and run them in parallel with configurable worker count and per-execution artifacts
@@ -136,14 +136,14 @@ When queue execution starts, the app creates these artifact folders inside the s
 
 ```text
 reports/     -> one .txt report per execution
-tracefiles/  -> one .trace.txt file per execution
+tracefiles/  -> one .csv VTM trace file per execution
 metrics/     -> one .csv metrics file per execution
 ```
 
 **Command executed:**
 
 ```bash
-EncoderAppStatic.exe -c <main_cfg> -c <sequence_cfg> -i <input.yuv> -f <frames> -q <qp> -b <output.bin>
+EncoderAppStatic.exe -c <main_cfg> -c <sequence_cfg> -i <input.yuv> -f <frames> -q <qp> -b <output.bin> --TraceFile=<trace.csv> --TraceRule="D_BLOCK_STATISTICS_CODED:poc>=0"
 ```
 
 ### Decoding Queue (Queue Only)

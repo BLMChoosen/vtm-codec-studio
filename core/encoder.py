@@ -31,6 +31,10 @@ class EncoderWorker(ProcessWorker):
         Quantisation parameter (-q)
     output_bin : str
         Path for the output bitstream file (-b)
+    trace_file : Optional[str]
+        Optional path to VTM TraceFile output (--TraceFile=...)
+    trace_rule : Optional[str]
+        Optional VTM tracing rule (--TraceRule=...)
     """
 
     def __init__(
@@ -42,6 +46,8 @@ class EncoderWorker(ProcessWorker):
         frames: int,
         qp: int,
         output_bin: str,
+        trace_file: Optional[str] = None,
+        trace_rule: Optional[str] = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -52,6 +58,8 @@ class EncoderWorker(ProcessWorker):
         self.frames = frames
         self.qp = qp
         self.output_bin = output_bin
+        self.trace_file = trace_file
+        self.trace_rule = trace_rule
         self._encoded_pocs: set[int] = set()
 
     def build_command(self) -> list[str]:
@@ -69,6 +77,10 @@ class EncoderWorker(ProcessWorker):
             "-q", str(self.qp),
             "-b", self.output_bin,
         ]
+        if self.trace_file:
+            cmd.append(f"--TraceFile={self.trace_file}")
+        if self.trace_rule:
+            cmd.append(f"--TraceRule={self.trace_rule}")
         return cmd
 
     def parse_progress_line(self, line: str) -> Optional[int]:

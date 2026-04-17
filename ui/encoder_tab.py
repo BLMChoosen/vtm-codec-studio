@@ -59,6 +59,8 @@ ENCODER_CONFIGS = [
     "encoder_randomaccess_vtm.cfg",
 ]
 
+TRACE_RULE_DEFAULT = "D_BLOCK_STATISTICS_CODED:poc>=0"
+
 
 @dataclass
 class EncodeJob:
@@ -367,7 +369,7 @@ class EncoderTab(QWidget):
         artifacts_hint.setStyleSheet("font-size: 12px; color: #8a90a4;")
         artifacts_layout.addWidget(artifacts_hint)
 
-        artifacts_note = QLabel("Cada execucao gera 3 arquivos: report (.txt), tracefile (.trace.txt) e metrics (.csv)")
+        artifacts_note = QLabel("Cada execucao gera 3 arquivos: report (.txt), tracefile (.csv) e metrics (.csv)")
         artifacts_note.setStyleSheet("font-size: 12px; color: #8a90a4;")
         artifacts_layout.addWidget(artifacts_note)
 
@@ -664,6 +666,8 @@ class EncoderTab(QWidget):
             self._log.append(f"❌ Validation failed for job {queue_index + 1}/{self._queue_total}:\n{msg}")
             return False
 
+        trace_csv_path = self._trace_csv_path(job, queue_index)
+
         worker = EncoderWorker(
             encoder_exe=self._config.encoder_path(),
             main_cfg=self._resolve_main_cfg(job.main_config),
@@ -672,6 +676,8 @@ class EncoderTab(QWidget):
             frames=job.frames,
             qp=job.qp,
             output_bin=job.output_bin,
+            trace_file=trace_csv_path or None,
+            trace_rule=TRACE_RULE_DEFAULT if trace_csv_path else None,
         )
 
         self._workers[worker] = job
@@ -706,6 +712,11 @@ class EncoderTab(QWidget):
             stem = f"job_{queue_index + 1:02d}"
         return f"{queue_index + 1:02d}_{stem}"
 
+    def _trace_csv_path(self, job: EncodeJob, queue_index: int) -> str:
+        if not self._tracefiles_dir:
+            return ""
+        return str(Path(self._tracefiles_dir) / f"{self._artifact_stem(job, queue_index)}.csv")
+
     def _write_execution_report(
         self,
         job: EncodeJob,
@@ -738,6 +749,12 @@ class EncoderTab(QWidget):
             "-b",
             job.output_bin,
         ])
+        trace_csv_path = self._trace_csv_path(job, queue_index)
+        if trace_csv_path:
+            cmd_parts.extend([
+                f"--TraceFile={trace_csv_path}",
+                f"--TraceRule={TRACE_RULE_DEFAULT}",
+            ])
 
         report_lines = [
             "VTM Codec Studio - Execution Report",
@@ -774,16 +791,16 @@ class EncoderTab(QWidget):
         except OSError as exc:
             self._log.append(f"❌ Failed to write report TXT: {exc}")
 
-    def _write_tracefile(self, job: EncodeJob, queue_index: int, job_logs: list[str]) -> None:
-        if not self._tracefiles_dir:
+    def _write_tracefile(self, job: EncodeJob, queue_index: int, _job_logs: list[str]) -> None:
+        trace_csv = self._trace_csv_path(job, queue_index)
+        if not trace_csv:
             return
 
-        trace_path = Path(self._tracefiles_dir) / f"{self._artifact_stem(job, queue_index)}.trace.txt"
-        try:
-            trace_path.write_text("\n".join(job_logs), encoding="utf-8")
-            self._log.append(f"📝 Tracefile saved: {trace_path}")
-        except OSError as exc:
-            self._log.append(f"❌ Failed to write tracefile: {exc}")
+        trace_path = Path(trace_csv)
+        if trace_path.exists():
+            self._log.append(f"📝 VTM Trace CSV saved: {trace_path}")
+        else:
+            self._log.append(f"⚠ VTM Trace CSV was not generated: {trace_path}")
 
     def _write_metrics_artifact(self, job: EncodeJob, queue_index: int, metrics: dict) -> None:
         if not self._metrics_dir:

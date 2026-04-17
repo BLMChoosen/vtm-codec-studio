@@ -61,7 +61,7 @@ class ProcessWorker(QThread):
         """Thread entry point — launch subprocess and stream output."""
         try:
             cmd = self.build_command()
-            self.signals.log_line.emit(f"▶ Command:\n  {' '.join(cmd)}\n")
+            self.signals.log_line.emit(f"▶ Command:\n  {subprocess.list2cmdline(cmd)}\n")
             self.signals.started.emit()
 
             self._process = subprocess.Popen(
