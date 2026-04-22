@@ -53,12 +53,14 @@ def validate_qp(value: str) -> tuple[bool, str]:
 
 
 def validate_executable(filepath: str, label: str = "Executable") -> tuple[bool, str]:
-    """Check that the executable exists and has .exe extension (Windows)."""
+    """Check that the executable exists and has execution permissions."""
     ok, msg = validate_file_exists(filepath, label)
     if not ok:
         return ok, msg
     if os.name == "nt" and not filepath.lower().endswith(".exe"):
         return False, f"{label} must be an .exe file on Windows."
+    elif os.name != "nt" and not os.access(filepath, os.X_OK):
+        return False, f"{label} must have execution permissions."
     return True, ""
 
 

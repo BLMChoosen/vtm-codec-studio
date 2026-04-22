@@ -5,6 +5,8 @@ Modal dialog for configuring VTM executable and configuration paths.
 Settings are persisted through ConfigManager.
 """
 
+import sys
+
 from PySide6.QtCore import Slot
 from PySide6.QtWidgets import (
     QDialog,
@@ -83,31 +85,36 @@ class SettingsDialog(QDialog):
         exe_layout = QVBoxLayout(exe_group)
         exe_layout.setSpacing(12)
 
+        is_win = sys.platform == "win32"
+        exe_filter = "Executable (*.exe);;All Files (*)" if is_win else "All Files (*)"
+        ext_hint = " (.exe)" if is_win else ""
+        exe_suffix = ".exe" if is_win else ""
+
         self._encoder_exe = FilePickerRow(
-            "Encoder (.exe):",
-            file_filter="Executable (*.exe);;All Files (*)",
-            placeholder="Path to EncoderAppStatic.exe",
+            f"Encoder{ext_hint}:",
+            file_filter=exe_filter,
+            placeholder=f"Path to EncoderAppStatic{exe_suffix}",
         )
         exe_layout.addWidget(self._encoder_exe)
 
         self._decoder_exe = FilePickerRow(
-            "Decoder (.exe):",
-            file_filter="Executable (*.exe);;All Files (*)",
-            placeholder="Path to DecoderAppStatic.exe",
+            f"Decoder{ext_hint}:",
+            file_filter=exe_filter,
+            placeholder=f"Path to DecoderAppStatic{exe_suffix}",
         )
         exe_layout.addWidget(self._decoder_exe)
 
         self._yuview_exe = FilePickerRow(
-            "YUView (.exe):",
-            file_filter="Executable (*.exe);;All Files (*)",
-            placeholder="Path to YUView executable",
+            f"YUView{ext_hint}:",
+            file_filter=exe_filter,
+            placeholder=f"Path to YUView executable",
         )
         exe_layout.addWidget(self._yuview_exe)
 
         self._ffmpeg_exe = FilePickerRow(
-            "FFmpeg (.exe):",
-            file_filter="Executable (*.exe);;All Files (*)",
-            placeholder="Path to ffmpeg.exe",
+            f"FFmpeg{ext_hint}:",
+            file_filter=exe_filter,
+            placeholder=f"Path to ffmpeg{exe_suffix}",
         )
         exe_layout.addWidget(self._ffmpeg_exe)
 
