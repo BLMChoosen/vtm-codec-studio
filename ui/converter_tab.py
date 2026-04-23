@@ -427,6 +427,12 @@ class ConverterTab(QWidget):
             QMessageBox.information(self, "Queue Empty", "Add at least one job to the queue first.")
             return
 
+        for idx, job in enumerate(self._queue, start=1):
+            ok, msg = self._validate_job(job)
+            if not ok:
+                QMessageBox.warning(self, "Validation Error", f"Job {idx}:\n{msg}")
+                return
+
         self._queue_running = True
         self._queue_cancel_requested = False
         self._queue_next_index = 0
