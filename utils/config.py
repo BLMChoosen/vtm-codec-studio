@@ -40,6 +40,7 @@ DEFAULT_SETTINGS = {
     "encoder_tracefiles_enabled": False,
     "encoder_parallel_jobs": 2,
     "decoder_parallel_jobs": 2,
+    "converter_parallel_jobs": 2,
     "window_geometry": None,
     "max_recent_files": 10,
 }

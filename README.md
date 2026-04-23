@@ -13,7 +13,7 @@ A modern desktop application for encoding and decoding **VVC (Versatile Video Co
 - **Encoder Interface** — Full parameter control: input YUV, main config, per-sequence config, frames, QP, output folder, and filename composition
 - **Decoder Interface** — Queue-based .bin → .yuv decoding with real-time log output
 - **Real-time Logs** — Scrollable terminal panel with live process output
-- **Progress Indicator** — Queue-aware progress estimation for encoder and decoder
+- **Progress Indicator** — Queue-aware progress estimation for encoder, decoder, and converter
 - **Execution Artifacts Folder (Encoder)** — Choose one base folder and automatically generate `reports/`, `tracefiles/`, and `metrics/`
 - **TXT Reports (Encoder)** — Save a full report (`.txt`) for each queue execution
 - **Tracefiles (Encoder)** — Save one VTM trace file (`.csv`) for each queue execution
@@ -21,6 +21,7 @@ A modern desktop application for encoding and decoding **VVC (Versatile Video Co
 - **Preset System** — Save, load, and delete named encoder parameter presets
 - **Encode Queue** — Queue multiple encoding jobs and run them in parallel with configurable worker count and per-execution artifacts
 - **Decode Queue** — Queue multiple decoding jobs and run them in parallel with configurable worker count and per-job CSV outputs
+- **Convert Queue** — Queue multiple `.y4m` conversion jobs and run them in parallel with configurable worker count
 - **Compression Profiles** — Save reusable compression parameters (config, sequence cfg, frames, QP)
 - **YUView Preview (Decode)** — Open reconstructed output `.yuv` directly in YUView
 - **Recent Files** — Quick access to recently used input/output files
@@ -162,6 +163,24 @@ EncoderAppStatic.exe -c <main_cfg> -c <sequence_cfg> -i <input.yuv> -f <frames> 
 
 ```bash
 DecoderAppStatic.exe -b <input.bin> -o <output.yuv>
+```
+
+### Conversion Queue (Queue Only)
+
+1. Switch to the **Converter** tab
+2. Browse for **input .y4m**
+3. Review/edit auto-filled **output .yuv** and **sequence .cfg** paths
+4. Set **Level**
+5. Click **+ Add Current Settings**
+6. Repeat for all jobs you want to process
+7. Set **Parallel Jobs** (number of concurrent workers)
+8. Click **▶ Start Queue** to run jobs in parallel
+9. Use **■ Cancel** to stop active jobs and cancel the remaining queue
+
+**Command executed:**
+
+```bash
+ffmpeg -y -i <input.y4m> -pix_fmt <pix_fmt> -f rawvideo <output.yuv>
 ```
 
 ### Presets

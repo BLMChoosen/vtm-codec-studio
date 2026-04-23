@@ -179,7 +179,7 @@ class MainWindow(QMainWindow):
             "<li>VTM Encoder with full parameter control</li>"
             "<li>Queue multiple encode jobs</li>"
             "<li>Queue multiple decode jobs with real-time logs</li>"
-            "<li>Convert .y4m to .yuv and generate sequence config</li>"
+            "<li>Queue multiple .y4m conversions to .yuv and sequence config</li>"
             "<li>TXT reports, tracefiles and CSV metrics in Encoder</li>"
             "<li>CSV output reports in Decoder</li>"
             "<li>Project presets and compression profiles</li>"
