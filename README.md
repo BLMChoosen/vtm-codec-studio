@@ -229,7 +229,7 @@ All settings and presets are saved locally:
 
 - Python 3.10+
 - PySide6 >= 6.6.0
-- Windows (for `.exe` execution; adaptable to Linux/macOS with minor changes)
+- Windows or Linux (adaptable to macOS with minor changes)
 
 ---
 
