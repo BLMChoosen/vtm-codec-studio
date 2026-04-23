@@ -72,6 +72,7 @@ class EncodeJob:
     frames: int
     qp: int
     output_bin: str
+    artifacts_dir: str
 
 
 class EncoderTab(QWidget):
@@ -96,9 +97,6 @@ class EncoderTab(QWidget):
         self._queue_completed = 0
         self._queue_total = 0
         self._queue_results: list[bool] = []
-        self._reports_dir = ""
-        self._tracefiles_dir = ""
-        self._metrics_dir = ""
 
         self._log_history: list[str] = []
 
@@ -196,17 +194,17 @@ class EncoderTab(QWidget):
         out_layout.setSpacing(12)
 
         self._output_dir_picker = FilePickerRow(
-            "Pasta .bin:",
-            placeholder="Escolha a pasta onde os arquivos .bin serao salvos",
+            ".bin folder:",
+            placeholder="Choose the folder where .bin files will be saved",
             mode="directory",
         )
         out_layout.addWidget(self._output_dir_picker)
 
-        name_group = QGroupBox("Formato do Nome do Arquivo")
+        name_group = QGroupBox("File Name Format")
         name_layout = QVBoxLayout(name_group)
         name_layout.setSpacing(8)
 
-        self._name_custom_check = QCheckBox("Personalizado")
+        self._name_custom_check = QCheckBox("Custom")
         self._name_custom_check.toggled.connect(self._toggle_custom_name)
         name_layout.addWidget(self._name_custom_check)
 
@@ -216,7 +214,7 @@ class EncoderTab(QWidget):
         custom_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         custom_row.addWidget(custom_lbl)
         self._name_custom_edit = QLineEdit()
-        self._name_custom_edit.setPlaceholderText("Ex.: teste")
+        self._name_custom_edit.setPlaceholderText("e.g., test")
         self._name_custom_edit.setEnabled(False)
         self._name_custom_edit.textChanged.connect(self._refresh_output_name_preview)
         custom_row.addWidget(self._name_custom_edit, stretch=1)
@@ -232,7 +230,7 @@ class EncoderTab(QWidget):
         self._name_frames_check.toggled.connect(self._refresh_output_name_preview)
         name_layout.addWidget(self._name_frames_check)
 
-        self._name_yuv_check = QCheckBox("Nome do YUV")
+        self._name_yuv_check = QCheckBox("YUV filename")
         self._name_yuv_check.setChecked(True)
         self._name_yuv_check.toggled.connect(self._refresh_output_name_preview)
         name_layout.addWidget(self._name_yuv_check)
@@ -244,7 +242,7 @@ class EncoderTab(QWidget):
         preview_row.addWidget(preview_lbl)
         self._output_name_preview = QLineEdit()
         self._output_name_preview.setReadOnly(True)
-        self._output_name_preview.setPlaceholderText("Selecione os campos para gerar o nome")
+        self._output_name_preview.setPlaceholderText("Select fields to generate the name")
         preview_row.addWidget(self._output_name_preview, stretch=1)
         name_layout.addLayout(preview_row)
 
@@ -351,29 +349,28 @@ class EncoderTab(QWidget):
         parallel_row.addStretch()
         queue_layout.addLayout(parallel_row)
 
-        form_layout.addWidget(queue_group)
-
         # -- Execution artifacts controls --
         artifacts_group = QGroupBox("Execution Artifacts")
         artifacts_layout = QVBoxLayout(artifacts_group)
         artifacts_layout.setSpacing(10)
 
         self._artifacts_dir_picker = FilePickerRow(
-            "Pasta de artefatos:",
-            placeholder="Escolha a pasta base para reports, tracefiles e metrics",
+            "Artifacts folder:",
+            placeholder="Choose the base folder for reports, tracefiles, and metrics",
             mode="directory",
         )
         artifacts_layout.addWidget(self._artifacts_dir_picker)
 
-        artifacts_hint = QLabel("Subpastas criadas automaticamente: reports, tracefiles, metrics")
+        artifacts_hint = QLabel("Subfolders created automatically: reports, tracefiles, metrics")
         artifacts_hint.setStyleSheet("font-size: 12px; color: #8a90a4;")
         artifacts_layout.addWidget(artifacts_hint)
 
-        artifacts_note = QLabel("Cada execucao gera 3 arquivos: report (.txt), tracefile (.csv) e metrics (.csv)")
+        artifacts_note = QLabel("Each run generates 3 files: report (.txt), tracefile (.csv), and metrics (.csv)")
         artifacts_note.setStyleSheet("font-size: 12px; color: #8a90a4;")
         artifacts_layout.addWidget(artifacts_note)
 
         form_layout.addWidget(artifacts_group)
+        form_layout.addWidget(queue_group)
 
         # -- Action buttons --
         btn_row = QHBoxLayout()
@@ -429,7 +426,7 @@ class EncoderTab(QWidget):
         if self._name_custom_check.isChecked():
             custom_value = self._sanitize_name_part(self._name_custom_edit.text())
             if not custom_value:
-                return False, "Personalizado esta marcado, mas o valor esta vazio."
+                return False, "Custom is checked, but the value is empty."
             parts.append(custom_value)
 
         if self._name_q_check.isChecked():
@@ -441,11 +438,11 @@ class EncoderTab(QWidget):
         if self._name_yuv_check.isChecked():
             yuv_name = self._sanitize_name_part(Path(input_yuv).stem)
             if not yuv_name:
-                return False, "Nao foi possivel extrair um nome valido do arquivo YUV de entrada."
+                return False, "Could not extract a valid name from the input YUV file."
             parts.append(yuv_name)
 
         if not parts:
-            return False, "Selecione ao menos uma checkbox para compor o nome do arquivo de output."
+            return False, "Select at least one checkbox to compose the output filename."
 
         return True, f"{'-'.join(parts)}.bin"
 
@@ -572,6 +569,7 @@ class EncoderTab(QWidget):
             validate_positive_int(str(job.frames), "Frames"),
             validate_qp(str(job.qp)),
             validate_output_path(job.output_bin, ".bin", "Output"),
+            validate_directory(job.artifacts_dir, "Artifacts folder"),
         ]
 
         if job.sequence_cfg:
@@ -592,28 +590,27 @@ class EncoderTab(QWidget):
                 return False, msg
         return True, ""
 
-    def _prepare_artifact_exports(self) -> tuple[bool, str]:
-        """Create and snapshot output folders for reports, tracefiles and metrics."""
-        root_dir = self._artifacts_dir_picker.path().strip()
-        ok, msg = validate_directory(root_dir, "Artifacts folder")
+    def _artifact_dirs_for_job(self, job: EncodeJob) -> tuple[Path, Path, Path]:
+        root_path = Path(job.artifacts_dir)
+        return (
+            root_path / "reports",
+            root_path / "tracefiles",
+            root_path / "metrics",
+        )
+
+    def _prepare_artifact_exports_for_job(self, job: EncodeJob) -> tuple[bool, str]:
+        """Create output folders for reports, tracefiles and metrics for one queued job."""
+        ok, msg = validate_directory(job.artifacts_dir, "Artifacts folder")
         if not ok:
             return False, msg
 
-        root_path = Path(root_dir)
-        reports_dir = root_path / "reports"
-        tracefiles_dir = root_path / "tracefiles"
-        metrics_dir = root_path / "metrics"
-
+        reports_dir, tracefiles_dir, metrics_dir = self._artifact_dirs_for_job(job)
         try:
             reports_dir.mkdir(parents=True, exist_ok=True)
             tracefiles_dir.mkdir(parents=True, exist_ok=True)
             metrics_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             return False, f"Failed to prepare output folders: {exc}"
-
-        self._reports_dir = str(reports_dir)
-        self._tracefiles_dir = str(tracefiles_dir)
-        self._metrics_dir = str(metrics_dir)
         return True, ""
 
     def _resolve_main_cfg(self, main_config: str) -> str:
@@ -638,6 +635,7 @@ class EncoderTab(QWidget):
             return None
 
         self._save_state()
+        artifacts_dir = str(Path(self._artifacts_dir_picker.path()).resolve())
         return EncodeJob(
             input_yuv=self._input_picker.path(),
             sequence_cfg=self._seq_cfg_picker.path(),
@@ -645,6 +643,7 @@ class EncoderTab(QWidget):
             frames=frames,
             qp=qp,
             output_bin=output_bin_or_msg,
+            artifacts_dir=artifacts_dir,
         )
 
     def _sync_form_to_job(self, job: EncodeJob) -> None:
@@ -657,6 +656,7 @@ class EncoderTab(QWidget):
         self._frames_edit.setText(str(job.frames))
         self._qp_edit.setText(str(job.qp))
         self._output_dir_picker.set_path(str(Path(job.output_bin).parent))
+        self._artifacts_dir_picker.set_path(job.artifacts_dir)
         self._output_name_preview.setText(Path(job.output_bin).name)
 
     def _start_worker_for_job(self, job: EncodeJob, queue_index: int) -> bool:
@@ -664,6 +664,13 @@ class EncoderTab(QWidget):
         ok, msg = self._validate_job(job)
         if not ok:
             self._log.append(f"❌ Validation failed for job {queue_index + 1}/{self._queue_total}:\n{msg}")
+            return False
+
+        ok, msg = self._prepare_artifact_exports_for_job(job)
+        if not ok:
+            self._log.append(
+                f"❌ Failed to prepare artifact folders for job {queue_index + 1}/{self._queue_total}:\n{msg}"
+            )
             return False
 
         trace_csv_path = self._trace_csv_path(job, queue_index)
@@ -703,7 +710,8 @@ class EncoderTab(QWidget):
         output_name = Path(job.output_bin).name
         return (
             f"Input: {input_name} | Output: {output_name} | "
-            f"Config: {job.main_config} | Frames: {job.frames} | QP: {job.qp}"
+            f"Config: {job.main_config} | Frames: {job.frames} | QP: {job.qp} | "
+            f"Artifacts: {job.artifacts_dir}"
         )
 
     def _artifact_stem(self, job: EncodeJob, queue_index: int) -> str:
@@ -713,9 +721,8 @@ class EncoderTab(QWidget):
         return f"{queue_index + 1:02d}_{stem}"
 
     def _trace_csv_path(self, job: EncodeJob, queue_index: int) -> str:
-        if not self._tracefiles_dir:
-            return ""
-        return str(Path(self._tracefiles_dir) / f"{self._artifact_stem(job, queue_index)}.csv")
+        _, tracefiles_dir, _ = self._artifact_dirs_for_job(job)
+        return str(tracefiles_dir / f"{self._artifact_stem(job, queue_index)}.csv")
 
     def _write_execution_report(
         self,
@@ -726,10 +733,8 @@ class EncoderTab(QWidget):
         job_logs: list[str],
         metrics: dict,
     ) -> None:
-        if not self._reports_dir:
-            return
-
-        report_path = Path(self._reports_dir) / f"{self._artifact_stem(job, queue_index)}.txt"
+        reports_dir, _, _ = self._artifact_dirs_for_job(job)
+        report_path = reports_dir / f"{self._artifact_stem(job, queue_index)}.txt"
         status_text = "SUCCESS" if success else "FAILED"
 
         cmd_parts = [
@@ -803,15 +808,21 @@ class EncoderTab(QWidget):
             self._log.append(f"⚠ VTM Trace CSV was not generated: {trace_path}")
 
     def _write_metrics_artifact(self, job: EncodeJob, queue_index: int, metrics: dict) -> None:
-        if not self._metrics_dir:
-            return
-
-        metrics_path = Path(self._metrics_dir) / f"{self._artifact_stem(job, queue_index)}.csv"
+        _, _, metrics_dir = self._artifact_dirs_for_job(job)
+        metrics_path = metrics_dir / f"{self._artifact_stem(job, queue_index)}.csv"
         try:
             write_metrics_csv(str(metrics_path), metrics)
             self._log.append(f"📝 Metrics CSV saved: {metrics_path}")
         except OSError as exc:
             self._log.append(f"❌ Failed to write metrics CSV: {exc}")
+
+    def _queue_artifacts_count(self) -> int:
+        unique_dirs: set[str] = set()
+        for job in self._queue:
+            if not job.artifacts_dir.strip():
+                continue
+            unique_dirs.add(str(Path(job.artifacts_dir).resolve()).casefold())
+        return len(unique_dirs)
 
     def _is_busy(self) -> bool:
         return self._queue_running or bool(self._workers)
@@ -928,7 +939,11 @@ class EncoderTab(QWidget):
 
         self._queue.append(job)
         self._refresh_queue_view()
-        self._log.set_status(f"Queued {len(self._queue)} encode job(s).", "#8a90a4")
+        artifacts_count = self._queue_artifacts_count()
+        self._log.set_status(
+            f"Queued {len(self._queue)} encode job(s) across {artifacts_count} artifact folder(s).",
+            "#8a90a4",
+        )
 
     @Slot()
     def _remove_selected_queue_item(self) -> None:
@@ -966,10 +981,11 @@ class EncoderTab(QWidget):
             QMessageBox.information(self, "Queue Empty", "Add at least one job to the queue first.")
             return
 
-        ok, msg = self._prepare_artifact_exports()
-        if not ok:
-            QMessageBox.warning(self, "Validation Error", msg)
-            return
+        for idx, job in enumerate(self._queue, start=1):
+            ok, msg = validate_directory(job.artifacts_dir, f"Artifacts folder (job {idx})")
+            if not ok:
+                QMessageBox.warning(self, "Validation Error", msg)
+                return
 
         self._queue_running = True
         self._queue_cancel_requested = False
@@ -988,8 +1004,12 @@ class EncoderTab(QWidget):
         self._log.clear()
         self._log_history.clear()
         self._log.set_progress(0)
+        artifacts_count = self._queue_artifacts_count()
         self._log.set_status(
-            f"Starting queue ({self._queue_total} jobs, max {self._max_parallel_jobs()} parallel)…",
+            (
+                f"Starting queue ({self._queue_total} jobs, {artifacts_count} artifact folder(s), "
+                f"max {self._max_parallel_jobs()} parallel)…"
+            ),
             "#ffc857",
         )
         self._set_running(True)
@@ -1026,9 +1046,6 @@ class EncoderTab(QWidget):
         self._queue_next_index = 0
         self._queue_completed = 0
         self._queue_total = 0
-        self._reports_dir = ""
-        self._tracefiles_dir = ""
-        self._metrics_dir = ""
         self._set_running(False)
 
     @Slot()

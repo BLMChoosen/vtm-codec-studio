@@ -35,15 +35,15 @@ class OutputTab(QWidget):
         self.lbl_entropy = QLabel("-")
         self.lbl_size = QLabel("-")
         
-        form_layout.addRow("Tempo de compressão:", self.lbl_time)
+        form_layout.addRow("Compression time:", self.lbl_time)
         form_layout.addRow("PSNR-Y:", self.lbl_psnry)
         form_layout.addRow("PSNR-U:", self.lbl_psnru)
         form_layout.addRow("PSNR-V:", self.lbl_psnrv)
         form_layout.addRow("PSNR-YUV:", self.lbl_psnryuv)
         form_layout.addRow("Bitrate:", self.lbl_bitrate)
         form_layout.addRow("SSIM:", self.lbl_ssim)
-        form_layout.addRow("Entropia:", self.lbl_entropy)
-        form_layout.addRow("Tamanho do arquivo:", self.lbl_size)
+        form_layout.addRow("Entropy:", self.lbl_entropy)
+        form_layout.addRow("File size:", self.lbl_size)
         
         layout.addWidget(self.group)
         layout.addStretch()
