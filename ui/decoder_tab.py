@@ -12,6 +12,7 @@ from typing import Optional
 
 from PySide6.QtCore import Qt, Slot
 from PySide6.QtWidgets import (
+    QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -125,6 +126,14 @@ class DecoderTab(QWidget):
 
         folder_btn_row = QHBoxLayout()
         folder_btn_row.addStretch()
+
+        self._add_files_btn = QPushButton("+ Add Multiple .bin Files…")
+        self._add_files_btn.setToolTip(
+            "Pick several .bin files at once. Each one is queued with auto-generated .yuv and .csv outputs in the chosen output folder."
+        )
+        self._add_files_btn.clicked.connect(self._add_files_to_queue)
+        folder_btn_row.addWidget(self._add_files_btn)
+
         self._add_folder_btn = QPushButton("+ Add Folder .bin Files")
         self._add_folder_btn.clicked.connect(self._add_folder_to_queue)
         folder_btn_row.addWidget(self._add_folder_btn)
@@ -315,18 +324,44 @@ class DecoderTab(QWidget):
         if not bin_files:
             return [], f"No .bin files found in folder:\n{input_dir}"
 
+        return self._build_jobs_for_bin_paths(bin_files, output_dir), ""
+
+    def _build_jobs_for_bin_paths(
+        self,
+        bin_files: list[Path],
+        output_dir: Path,
+    ) -> list[DecodeJob]:
+        existing_outputs = {Path(job.output_yuv).resolve().as_posix().casefold() for job in self._queue}
+        used_stems: dict[str, int] = {}
         jobs: list[DecodeJob] = []
+
         for bin_file in bin_files:
             stem = bin_file.stem
+            yuv_path = output_dir / f"{stem}.yuv"
+            csv_path = output_dir / f"{stem}.csv"
+            counter = used_stems.get(stem, 0)
+
+            while (
+                yuv_path.resolve().as_posix().casefold() in existing_outputs
+                or any(
+                    Path(j.output_yuv).resolve().as_posix().casefold()
+                    == yuv_path.resolve().as_posix().casefold()
+                    for j in jobs
+                )
+            ):
+                counter += 1
+                yuv_path = output_dir / f"{stem}_{counter}.yuv"
+                csv_path = output_dir / f"{stem}_{counter}.csv"
+
+            used_stems[stem] = counter
             jobs.append(
                 DecodeJob(
                     input_bin=str(bin_file),
-                    output_yuv=str(output_dir / f"{stem}.yuv"),
-                    output_csv=str(output_dir / f"{stem}.csv"),
+                    output_yuv=str(yuv_path),
+                    output_csv=str(csv_path),
                 )
             )
-
-        return jobs, ""
+        return jobs
 
     # ------------------------------------------------------------------
     # Queue helpers
@@ -470,6 +505,66 @@ class DecoderTab(QWidget):
         self._refresh_queue_view()
         self._log.set_status(
             f"Queued {len(jobs)} folder job(s). Total in queue: {len(self._queue)}.",
+            "#8a90a4",
+        )
+
+    @Slot()
+    def _add_files_to_queue(self) -> None:
+        if self._is_busy():
+            return
+
+        start_dir = self._input_dir_picker.path() or ""
+        if not start_dir and self._input_picker.path():
+            start_dir = str(Path(self._input_picker.path()).parent)
+
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select .bin files",
+            start_dir,
+            "VVC Bitstream (*.bin);;All Files (*)",
+        )
+        if not paths:
+            return
+
+        output_dir_text = self._output_dir_picker.path()
+        if not output_dir_text:
+            output_dir_text = QFileDialog.getExistingDirectory(
+                self,
+                "Select output folder for decoded .yuv files",
+                start_dir,
+            )
+            if not output_dir_text:
+                return
+            self._output_dir_picker.set_path(output_dir_text)
+
+        ok, msg = validate_directory(output_dir_text, "Output folder")
+        if not ok:
+            QMessageBox.warning(self, "Validation Error", msg)
+            return
+
+        bin_files: list[Path] = []
+        for path in paths:
+            candidate = Path(path)
+            if not candidate.is_file():
+                QMessageBox.warning(self, "Validation Error", f"File not found:\n{candidate}")
+                return
+            if candidate.suffix.lower() != ".bin":
+                QMessageBox.warning(
+                    self,
+                    "Validation Error",
+                    f"Only .bin files are accepted:\n{candidate}",
+                )
+                return
+            bin_files.append(candidate)
+
+        jobs = self._build_jobs_for_bin_paths(bin_files, Path(output_dir_text))
+        if not jobs:
+            return
+
+        self._queue.extend(jobs)
+        self._refresh_queue_view()
+        self._log.set_status(
+            f"Queued {len(jobs)} .bin file(s). Total in queue: {len(self._queue)}.",
             "#8a90a4",
         )
 
@@ -675,6 +770,7 @@ class DecoderTab(QWidget):
     def _set_running(self, running: bool) -> None:
         self._add_queue_btn.setEnabled(not running)
         self._add_folder_btn.setEnabled(not running)
+        self._add_files_btn.setEnabled(not running)
         self._cancel_btn.setEnabled(running)
         self._preview_output_btn.setEnabled(not running)
         self._parallel_spin.setEnabled(not running)

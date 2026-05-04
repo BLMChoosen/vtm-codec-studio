@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.encoder import EncoderWorker
+from ui.batch_encode_dialog import BatchEncodeDialog, BatchEncodePlan
 from ui.widgets import FilePickerRow, LogPanel, ScrollSafeComboBox, ScrollSafeSpinBox
 from utils.csv_export import write_metrics_csv
 from utils.config import ConfigManager
@@ -323,6 +324,13 @@ class EncoderTab(QWidget):
         self._add_queue_btn = QPushButton("+ Add Current Settings")
         self._add_queue_btn.clicked.connect(self._add_current_to_queue)
         queue_btn_row.addWidget(self._add_queue_btn)
+
+        self._batch_queue_btn = QPushButton("+ Batch Add (QPs × Configs)")
+        self._batch_queue_btn.setToolTip(
+            "Open a batch dialog to enqueue the same input(s) with multiple QPs and configurations at once."
+        )
+        self._batch_queue_btn.clicked.connect(self._open_batch_dialog)
+        queue_btn_row.addWidget(self._batch_queue_btn)
 
         self._remove_queue_btn = QPushButton("Remove Selected")
         self._remove_queue_btn.clicked.connect(self._remove_selected_queue_item)
@@ -946,6 +954,82 @@ class EncoderTab(QWidget):
         )
 
     @Slot()
+    def _open_batch_dialog(self) -> None:
+        if self._is_busy():
+            return
+
+        defaults = self._batch_dialog_defaults()
+        dialog = BatchEncodeDialog(self, defaults=defaults)
+        if dialog.exec() != BatchEncodeDialog.DialogCode.Accepted:
+            return
+
+        plans = dialog.plans()
+        if not plans:
+            return
+
+        added = 0
+        for plan in plans:
+            self._queue.append(self._plan_to_job(plan))
+            added += 1
+
+        if added == 0:
+            return
+
+        last_plan = plans[-1]
+        self._cfg_combo.setCurrentText(last_plan.main_config)
+        self._frames_edit.setText(str(last_plan.frames))
+        self._qp_edit.setText(str(last_plan.qp))
+        self._output_dir_picker.set_path(str(Path(last_plan.output_bin).parent))
+        self._artifacts_dir_picker.set_path(last_plan.artifacts_dir)
+        if last_plan.sequence_cfg:
+            self._seq_cfg_picker.set_path(last_plan.sequence_cfg)
+        self._save_state()
+
+        self._refresh_queue_view()
+        artifacts_count = self._queue_artifacts_count()
+        self._log.set_status(
+            f"Queued +{added} job(s) from batch. Total: {len(self._queue)} across {artifacts_count} artifact folder(s).",
+            "#8a90a4",
+        )
+
+    def _batch_dialog_defaults(self) -> dict:
+        seed_inputs: list[str] = []
+        current_input = self._input_picker.path()
+        if current_input:
+            seed_inputs.append(current_input)
+
+        last_input_dir = ""
+        if current_input:
+            last_input_dir = str(Path(current_input).parent)
+
+        return {
+            "seed_inputs": seed_inputs,
+            "last_input_dir": last_input_dir,
+            "sequence_cfg": self._seq_cfg_picker.path(),
+            "frames": self._frames_edit.text(),
+            "last_qp": self._qp_edit.text(),
+            "last_config": self._cfg_combo.currentText(),
+            "output_dir": self._output_dir_picker.path(),
+            "artifacts_dir": self._artifacts_dir_picker.path(),
+            "name_custom_enabled": self._name_custom_check.isChecked(),
+            "name_custom_text": self._name_custom_edit.text(),
+            "name_include_q": self._name_q_check.isChecked(),
+            "name_include_frames": self._name_frames_check.isChecked(),
+            "name_include_yuv": self._name_yuv_check.isChecked(),
+        }
+
+    def _plan_to_job(self, plan: BatchEncodePlan) -> EncodeJob:
+        return EncodeJob(
+            input_yuv=plan.input_yuv,
+            sequence_cfg=plan.sequence_cfg,
+            main_config=plan.main_config,
+            frames=plan.frames,
+            qp=plan.qp,
+            output_bin=plan.output_bin,
+            artifacts_dir=plan.artifacts_dir,
+        )
+
+    @Slot()
     def _remove_selected_queue_item(self) -> None:
         if self._is_busy():
             return
@@ -1128,6 +1212,7 @@ class EncoderTab(QWidget):
 
     def _set_running(self, running: bool) -> None:
         self._add_queue_btn.setEnabled(not running)
+        self._batch_queue_btn.setEnabled(not running)
         self._cancel_btn.setEnabled(running)
         self._save_preset_btn.setEnabled(not running)
         self._load_preset_btn.setEnabled(not running)
