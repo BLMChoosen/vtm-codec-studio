@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 from ui.decoder_tab import DecoderTab
 from ui.encoder_tab import EncoderTab
 from ui.converter_tab import ConverterTab
+from ui.variance_maps_tab import VarianceMapsTab
 from ui.settings_dialog import SettingsDialog
 from ui.theme import ACCENT, BG_DARK
 from utils.config import ConfigManager
@@ -130,10 +131,12 @@ class MainWindow(QMainWindow):
         self._encoder_tab = EncoderTab()
         self._decoder_tab = DecoderTab()
         self._converter_tab = ConverterTab()
-        
-        self._tabs.addTab(self._encoder_tab, "🎬  Encoder")
-        self._tabs.addTab(self._decoder_tab, "📼  Decoder")
-        self._tabs.addTab(self._converter_tab, "🔁  Converter")
+        self._variance_maps_tab = VarianceMapsTab()
+
+        self._tabs.addTab(self._encoder_tab,      "🎬  Encoder")
+        self._tabs.addTab(self._decoder_tab,      "📼  Decoder")
+        self._tabs.addTab(self._converter_tab,    "🔁  Converter")
+        self._tabs.addTab(self._variance_maps_tab, "📊  Variance Maps")
         layout.addWidget(self._tabs, stretch=1)
 
         self.setCentralWidget(central)

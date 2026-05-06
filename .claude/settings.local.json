@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\davio\\\\OneDrive\\\\Área de Trabalho\\\\Pythoncodec\" -Recurse -Filter \"*.py\")",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "Bash(Sort-Object)",
+      "Bash(python -c \"from core.variance_maps import VarianceMapsWorker, VarianceJob; from ui.variance_maps_tab import VarianceMapsTab; print\\('OK'\\)\")",
+      "Bash(python -c \"import sys; print\\(sys.executable\\)\")",
+      "Bash(.venv/Scripts/python -c \"from core.variance_maps import VarianceMapsWorker, VarianceJob; from ui.variance_maps_tab import VarianceMapsTab; print\\('OK'\\)\")",
+      "Bash(.venv/Scripts/pip list *)",
+      "Bash(.venv/Scripts/pip install *)"
+    ]
+  }
+}
