@@ -160,16 +160,23 @@ class VarianceMapsTab(QWidget):
         fl.addWidget(orig_group)
 
         # ── Decoded YUV ───────────────────────────────────────────────
-        dec_group = QGroupBox("Decoded YUV")
+        dec_group = QGroupBox("Decoded YUV (10-bit, VTM output)")
         dec_layout = QVBoxLayout(dec_group)
         dec_layout.setSpacing(10)
 
-        self._dec_picker = FilePickerRow(
-            "Decoded .yuv:",
+        self._dec_ld_picker = FilePickerRow(
+            "Decoded LD .yuv:",
             file_filter="YUV Files (*.yuv);;All Files (*)",
-            placeholder="Drag & drop or browse for decoded YUV (10-bit, VTM output)",
+            placeholder="Decoded with Low Delay config",
         )
-        dec_layout.addWidget(self._dec_picker)
+        dec_layout.addWidget(self._dec_ld_picker)
+
+        self._dec_ra_picker = FilePickerRow(
+            "Decoded RA .yuv:",
+            file_filter="YUV Files (*.yuv);;All Files (*)",
+            placeholder="Decoded with Random Access config",
+        )
+        dec_layout.addWidget(self._dec_ra_picker)
         fl.addWidget(dec_group)
 
         # ── Output ────────────────────────────────────────────────────
@@ -275,8 +282,9 @@ class VarianceMapsTab(QWidget):
 
     def _validate_form(self) -> tuple[bool, str]:
         checks = [
-            validate_file_exists(self._orig_picker.path(), "Original YUV"),
-            validate_file_exists(self._dec_picker.path(),  "Decoded YUV"),
+            validate_file_exists(self._orig_picker.path(),   "Original YUV"),
+            validate_file_exists(self._dec_ld_picker.path(), "Decoded LD YUV"),
+            validate_file_exists(self._dec_ra_picker.path(), "Decoded RA YUV"),
             validate_output_path(self._csv_picker.path(), ".csv", "Output CSV"),
         ]
         for ok, msg in checks:
@@ -292,18 +300,20 @@ class VarianceMapsTab(QWidget):
             QMessageBox.warning(self, "Validation Error", msg)
             return None
         return VarianceJob(
-            original_yuv=self._orig_picker.path(),
-            decoded_yuv= self._dec_picker.path(),
-            width=       self._width_spin.value(),
-            height=      self._height_spin.value(),
-            bitdepth=    self._bitdepth_combo.currentData(),
-            frames=      self._frames_spin.value(),
-            output_csv=  self._csv_picker.path(),
+            original_yuv=   self._orig_picker.path(),
+            decoded_yuv_ld= self._dec_ld_picker.path(),
+            decoded_yuv_ra= self._dec_ra_picker.path(),
+            width=          self._width_spin.value(),
+            height=         self._height_spin.value(),
+            bitdepth=       self._bitdepth_combo.currentData(),
+            frames=         self._frames_spin.value(),
+            output_csv=     self._csv_picker.path(),
         )
 
     def _sync_form_to_job(self, job: VarianceJob) -> None:
         self._orig_picker.set_path(job.original_yuv)
-        self._dec_picker.set_path(job.decoded_yuv)
+        self._dec_ld_picker.set_path(job.decoded_yuv_ld)
+        self._dec_ra_picker.set_path(job.decoded_yuv_ra)
         self._width_spin.setValue(job.width)
         self._height_spin.setValue(job.height)
         self._csv_picker.set_path(job.output_csv)
@@ -314,9 +324,10 @@ class VarianceMapsTab(QWidget):
 
     def _job_summary(self, job: VarianceJob) -> str:
         orig = Path(job.original_yuv).name
-        dec  = Path(job.decoded_yuv).name
+        ld   = Path(job.decoded_yuv_ld).name
+        ra   = Path(job.decoded_yuv_ra).name
         csv  = Path(job.output_csv).name
-        return f"Orig: {orig} | Dec: {dec} | {job.width}×{job.height} | CSV: {csv}"
+        return f"Orig: {orig} | LD: {ld} | RA: {ra} | {job.width}×{job.height} | CSV: {csv}"
 
     def _refresh_queue_view(self) -> None:
         prev = self._queue_list.currentRow()
