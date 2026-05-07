@@ -16,16 +16,19 @@ deterministic structure (see CompleteWorkflowTab docs).
 
 from __future__ import annotations
 
+import itertools
 import json
 import math
 import re
 import shutil
 import subprocess
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 import pandas as pd
@@ -56,6 +59,19 @@ from utils.y4m import (
     frame_size_bytes,
     parse_y4m_metadata,
 )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _run_safely(runner: Callable[[int, object], bool], idx: int, item: object) -> bool:
+    """Wrap a runner so the executor surfaces booleans (and never None)."""
+    try:
+        return bool(runner(idx, item))
+    except Exception:
+        # Re-raise so the orchestrator can log and treat it as failure.
+        raise
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -139,6 +155,10 @@ class WorkflowConfig:
     # Variance / Dataset
     variance_frames: int = 33
 
+    # Parallelism — number of independent stage tasks that run at the same time.
+    # The Dataset stage is always sequential and waits for the others to finish.
+    parallel_jobs: int = 2
+
     def selected_stage_count(self) -> int:
         return sum([
             self.steps.converter,
@@ -176,11 +196,22 @@ class WorkflowOrchestrator(QThread):
         self.signals = WorkflowSignals()
         self._cfg = cfg
         self._cancelled = False
-        self._process: Optional[subprocess.Popen] = None
+
+        # Active subprocesses — keyed by a unique id so cancel() can terminate
+        # every in-flight worker, not just the most recent one.
+        self._processes: dict[int, subprocess.Popen] = {}
+        self._processes_lock = threading.Lock()
+        self._proc_seq = itertools.count(1)
 
         # Progress accounting — number of "atomic operations" planned and done.
         self._total_units = 0
         self._done_units  = 0
+        self._units_lock  = threading.Lock()
+
+        # Per-stage task progress (used to drive the stage progress bar).
+        self._stage_lock = threading.Lock()
+        self._stage_task_progress: dict[str, int] = {}
+        self._stage_task_total: int = 0
 
         # Shared workflow state
         self._executions: list[dict] = []         # populated as we go (used for metadata)
@@ -192,11 +223,14 @@ class WorkflowOrchestrator(QThread):
 
     def cancel(self) -> None:
         self._cancelled = True
-        if self._process is not None and self._process.poll() is None:
-            try:
-                self._process.terminate()
-            except OSError:
-                pass
+        with self._processes_lock:
+            in_flight = list(self._processes.values())
+        for proc in in_flight:
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                except OSError:
+                    pass
 
     # ------------------------------------------------------------------
     # Main loop
@@ -285,7 +319,7 @@ class WorkflowOrchestrator(QThread):
 
     def _stage_converter(self, root: Path) -> Optional[dict[str, dict]]:
         """
-        Run the converter stage on all .y4m inputs.
+        Run the converter stage on all .y4m inputs in parallel.
 
         Returns a dict mapping input-name → {yuv_path, cfg_path, metadata}
         for every input (whether converted in this run, copied from the
@@ -294,73 +328,86 @@ class WorkflowOrchestrator(QThread):
         """
         cfg = self._cfg
         results: dict[str, dict] = {}
+        results_lock = threading.Lock()
 
+        # Step 1 — handle .yuv inputs (no work needed) and pre-create the
+        # converter/ folder when the stage is enabled.
         if cfg.steps.converter:
             self._stage_started("Converter")
-            converter_dir = root / "converter"
-            converter_dir.mkdir(parents=True, exist_ok=True)
+            (root / "converter").mkdir(parents=True, exist_ok=True)
 
+        y4m_items: list[InputItem] = []
         for item in cfg.inputs:
-            if self._cancelled:
-                return None
-
-            video = item.name
             if item.is_yuv:
-                yuv_path = item.path
-                cfg_path = item.per_sequence_cfg
-                results[video] = {
-                    "yuv": yuv_path,
-                    "cfg": cfg_path,
+                results[item.name] = {
+                    "yuv": item.path,
+                    "cfg": item.per_sequence_cfg,
                     "frames_converted": None,
                     "metadata": None,
                 }
-                continue
+            else:
+                y4m_items.append(item)
 
-            # .y4m input
-            target_yuv = root / "converter" / f"{video}.yuv"
-            target_cfg = root / "converter" / f"{video}_per-sequence.cfg"
+        # Step 2 — for .y4m inputs, either run conversion in parallel or
+        # discover previously converted files.
+        if not cfg.steps.converter:
+            for item in y4m_items:
+                target_yuv = root / "converter" / f"{item.name}.yuv"
+                target_cfg = root / "converter" / f"{item.name}_per-sequence.cfg"
+                if not target_yuv.is_file() or not target_cfg.is_file():
+                    self._log(
+                        f"❌ Converter is disabled but no pre-converted files found "
+                        f"for {item.name} (expected {target_yuv} and {target_cfg})."
+                    )
+                    return None
+                results[item.name] = {
+                    "yuv": str(target_yuv),
+                    "cfg": str(target_cfg),
+                    "frames_converted": "existing",
+                    "metadata": None,
+                }
+        elif y4m_items:
+            self._stage_begin(len(y4m_items))
 
-            if cfg.steps.converter:
-                self._log(f"\n── Converter: {video} ──")
+            def runner(idx: int, item: InputItem) -> bool:
+                if self._cancelled:
+                    return False
+                target_yuv = root / "converter" / f"{item.name}.yuv"
+                target_cfg = root / "converter" / f"{item.name}_per-sequence.cfg"
+                target_yuv.parent.mkdir(parents=True, exist_ok=True)
+                task_id = f"conv-{idx:03d}"
+
+                self._log(f"\n── Converter [{idx + 1}/{len(y4m_items)}]: {item.name} ──")
                 self._log(f"  Source : {item.path}")
                 self._log(f"  Output : {target_yuv}")
-
-                target_yuv.parent.mkdir(parents=True, exist_ok=True)
 
                 ok = self._convert_y4m_to_yuv(
                     src_y4m=item.path,
                     out_yuv=str(target_yuv),
                     out_cfg=str(target_cfg),
                     max_frames=cfg.converter_max_frames,
+                    task_id=task_id,
                 )
                 if not ok:
                     if not self._cancelled:
-                        self._log(f"❌ Converter failed for {video}")
-                    self._stage_finished("Converter", False)
-                    return None
+                        self._log(f"❌ Converter failed for {item.name}")
+                    return False
 
+                with results_lock:
+                    results[item.name] = {
+                        "yuv": str(target_yuv),
+                        "cfg": str(target_cfg),
+                        "frames_converted": cfg.converter_max_frames or "all",
+                        "metadata": None,
+                    }
                 self._advance_unit()
-                results[video] = {
-                    "yuv": str(target_yuv),
-                    "cfg": str(target_cfg),
-                    "frames_converted": cfg.converter_max_frames or "all",
-                    "metadata": None,
-                }
-            else:
-                # Converter disabled but input is .y4m — must already exist on disk.
-                if not target_yuv.is_file() or not target_cfg.is_file():
-                    self._log(
-                        f"❌ Converter is disabled but no pre-converted files found "
-                        f"for {video} (expected {target_yuv} and {target_cfg})."
-                    )
-                    self._stage_finished("Converter", False)
-                    return None
-                results[video] = {
-                    "yuv": str(target_yuv),
-                    "cfg": str(target_cfg),
-                    "frames_converted": "existing",
-                    "metadata": None,
-                }
+                self._stage_task_complete(task_id)
+                return True
+
+            success, _ = self._run_parallel(y4m_items, runner)
+            if not success:
+                self._stage_finished("Converter", False)
+                return None
 
         if cfg.steps.converter:
             self._stage_finished("Converter", True)
@@ -382,13 +429,14 @@ class WorkflowOrchestrator(QThread):
         out_yuv: str,
         out_cfg: str,
         max_frames: Optional[int],
+        task_id: str,
     ) -> bool:
         cfg = self._cfg
 
         try:
             metadata = parse_y4m_metadata(src_y4m)
         except Exception as exc:  # pylint: disable=broad-except
-            self._log(f"❌ Failed to read Y4M header: {exc}")
+            self._log(f"❌ Failed to read Y4M header for {Path(src_y4m).name}: {exc}")
             return False
 
         self._log(
@@ -406,7 +454,12 @@ class WorkflowOrchestrator(QThread):
             ffmpeg_cmd += ["-frames:v", str(max_frames)]
         ffmpeg_cmd += ["-f", "rawvideo", out_yuv]
 
-        ok = self._run_command(ffmpeg_cmd, label="ffmpeg", parse_progress=self._ffmpeg_progress)
+        ok = self._run_command(
+            ffmpeg_cmd,
+            label=f"ffmpeg {Path(src_y4m).stem}",
+            parse_progress=self._ffmpeg_progress,
+            on_progress=lambda pct, _id=task_id: self._stage_set_task_progress(_id, pct),
+        )
         if not ok:
             return False
         if self._cancelled:
@@ -443,122 +496,156 @@ class WorkflowOrchestrator(QThread):
         cfg = self._cfg
         self._stage_started("Encode")
 
-        for ex in executions:
-            if self._cancelled:
+        # Validate every selected mode has a usable cfg before queuing tasks.
+        for mode_code in cfg.encode_modes:
+            main_cfg = self._resolve_main_cfg(MODE_INFO[mode_code]["cfg_file"])
+            if not Path(main_cfg).is_file():
+                self._log(
+                    f"❌ Encoder config not found: {main_cfg}\n"
+                    f"   Set the cfg folder under Settings."
+                )
+                self._stage_finished("Encode", False)
                 return False
 
-            for mode_code in cfg.encode_modes:
-                if self._cancelled:
-                    return False
+        # Build the (execution × mode) task list.
+        tasks: list[tuple[dict, str]] = [
+            (ex, mode_code)
+            for ex in executions
+            for mode_code in cfg.encode_modes
+        ]
+        if not tasks:
+            self._stage_finished("Encode", True)
+            return True
 
-                mode = MODE_INFO[mode_code]
-                exec_dir = root / "encoder" / mode["folder"] / ex["id"]
-                artifacts_dir = exec_dir / "artifacts"
-                artifacts_dir.mkdir(parents=True, exist_ok=True)
+        self._stage_begin(len(tasks))
+        self._log(
+            f"  Running {len(tasks)} encode task(s) "
+            f"with up to {self._max_parallel()} parallel job(s)."
+        )
 
-                bin_path = exec_dir / "result.bin"
-                trace_path = artifacts_dir / "trace.csv"
-                report_path = artifacts_dir / "report.txt"
-                metrics_path = artifacts_dir / "metrics.csv"
-                command_path = artifacts_dir / "command.txt"
-                cfg_copy = artifacts_dir / "per-sequence.cfg"
+        def runner(idx: int, task: tuple[dict, str]) -> bool:
+            if self._cancelled:
+                return False
+            ex, mode_code = task
+            return self._encode_one(root, ex, mode_code, task_index=idx, task_count=len(tasks))
 
-                main_cfg = self._resolve_main_cfg(mode["cfg_file"])
-                if not Path(main_cfg).is_file():
-                    self._log(
-                        f"❌ Encoder config not found: {main_cfg}\n"
-                        f"   Set the cfg folder under Settings."
-                    )
-                    self._stage_finished("Encode", False)
-                    return False
-
-                self._log(
-                    f"\n── Encode {ex['id']} [{mode_code}] {ex['video']} qp={ex['qp']} ──"
-                )
-
-                # Copy the per-sequence cfg into the artifacts folder for traceability.
-                try:
-                    shutil.copyfile(ex["cfg"], cfg_copy)
-                except OSError as exc:
-                    self._log(f"⚠ Could not copy per-sequence cfg into artifacts: {exc}")
-
-                command = [
-                    cfg.encoder_exe,
-                    "-c", main_cfg,
-                    "-c", ex["cfg"],
-                    "-i", ex["yuv"],
-                    "-f", str(cfg.encode_frames),
-                    "-q", str(ex["qp"]),
-                    "-b", str(bin_path),
-                    f"--TraceFile={trace_path}",
-                    f"--TraceRule={TRACE_RULE_DEFAULT}",
-                ]
-
-                try:
-                    command_path.write_text(subprocess.list2cmdline(command), encoding="utf-8")
-                except OSError:
-                    pass
-
-                # Track POCs to report progress.
-                seen_pocs: set[int] = set()
-                run_logs: list[str] = []
-
-                def _on_line(line: str) -> None:
-                    run_logs.append(line)
-
-                def _progress(line: str) -> Optional[int]:
-                    match = re.match(r"\s*POC\s+(\d+)", line)
-                    if match and cfg.encode_frames > 0:
-                        seen_pocs.add(int(match.group(1)))
-                        encoded = min(len(seen_pocs), cfg.encode_frames)
-                        return int(encoded / cfg.encode_frames * 100)
-                    return None
-
-                ok = self._run_command(
-                    command,
-                    label=f"enc-{mode_code}",
-                    parse_progress=_progress,
-                    line_capture=_on_line,
-                )
-                if not ok:
-                    if not self._cancelled:
-                        self._log(f"❌ Encode failed for {ex['id']} [{mode_code}]")
-                    self._stage_finished("Encode", False)
-                    return False
-                if self._cancelled:
-                    return False
-
-                # Parse metrics from the captured log
-                metrics = parse_vtm_log("\n".join(run_logs), str(bin_path))
-
-                # Write metrics + report
-                self._write_metrics_csv(metrics_path, metrics)
-                self._write_report_txt(
-                    report_path=report_path,
-                    execution_id=ex["id"],
-                    mode_code=mode_code,
-                    video=ex["video"],
-                    qp=ex["qp"],
-                    main_cfg=main_cfg,
-                    sequence_cfg=ex["cfg"],
-                    input_yuv=ex["yuv"],
-                    output_bin=str(bin_path),
-                    frames=cfg.encode_frames,
-                    command=command,
-                    metrics=metrics,
-                    log_lines=run_logs,
-                )
-
-                ex["modes"][mode_code]["bin"] = str(bin_path)
-                ex["modes"][mode_code]["trace"] = str(trace_path)
-                ex["modes"][mode_code]["report"] = str(report_path)
-                ex["modes"][mode_code]["metrics_csv"] = str(metrics_path)
-                ex["modes"][mode_code]["metrics"] = metrics
-
-                self._advance_unit()
-                self._log(f"  ✅ {bin_path.name} ({metrics.get('size', '-')})")
+        success, _ = self._run_parallel(tasks, runner)
+        if not success:
+            if not self._cancelled:
+                self._log("❌ Encode stage finished with failures.")
+            self._stage_finished("Encode", False)
+            return False
 
         self._stage_finished("Encode", True)
+        return True
+
+    def _encode_one(
+        self,
+        root: Path,
+        ex: dict,
+        mode_code: str,
+        task_index: int,
+        task_count: int,
+    ) -> bool:
+        cfg = self._cfg
+        mode = MODE_INFO[mode_code]
+        exec_dir = root / "encoder" / mode["folder"] / ex["id"]
+        artifacts_dir = exec_dir / "artifacts"
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+        bin_path = exec_dir / "result.bin"
+        trace_path = artifacts_dir / "trace.csv"
+        report_path = artifacts_dir / "report.txt"
+        metrics_path = artifacts_dir / "metrics.csv"
+        command_path = artifacts_dir / "command.txt"
+        cfg_copy = artifacts_dir / "per-sequence.cfg"
+
+        main_cfg = self._resolve_main_cfg(mode["cfg_file"])
+
+        task_id = f"enc-{task_index:03d}"
+        prefix = f"[{task_index + 1}/{task_count} enc-{mode_code} {ex['id']}]"
+        self._log(
+            f"\n── Encode {prefix} {ex['video']} qp={ex['qp']} ──"
+        )
+
+        # Copy the per-sequence cfg into the artifacts folder for traceability.
+        try:
+            shutil.copyfile(ex["cfg"], cfg_copy)
+        except OSError as exc:
+            self._log(f"⚠ {prefix} Could not copy per-sequence cfg into artifacts: {exc}")
+
+        command = [
+            cfg.encoder_exe,
+            "-c", main_cfg,
+            "-c", ex["cfg"],
+            "-i", ex["yuv"],
+            "-f", str(cfg.encode_frames),
+            "-q", str(ex["qp"]),
+            "-b", str(bin_path),
+            f"--TraceFile={trace_path}",
+            f"--TraceRule={TRACE_RULE_DEFAULT}",
+        ]
+
+        try:
+            command_path.write_text(subprocess.list2cmdline(command), encoding="utf-8")
+        except OSError:
+            pass
+
+        seen_pocs: set[int] = set()
+        run_logs: list[str] = []
+
+        def _on_line(line: str) -> None:
+            run_logs.append(line)
+
+        def _progress(line: str) -> Optional[int]:
+            match = re.match(r"\s*POC\s+(\d+)", line)
+            if match and cfg.encode_frames > 0:
+                seen_pocs.add(int(match.group(1)))
+                encoded = min(len(seen_pocs), cfg.encode_frames)
+                return int(encoded / cfg.encode_frames * 100)
+            return None
+
+        ok = self._run_command(
+            command,
+            label=f"enc-{mode_code} {ex['id']}",
+            parse_progress=_progress,
+            line_capture=_on_line,
+            on_progress=lambda pct, _id=task_id: self._stage_set_task_progress(_id, pct),
+        )
+        if not ok:
+            if not self._cancelled:
+                self._log(f"❌ {prefix} encode failed.")
+            return False
+        if self._cancelled:
+            return False
+
+        metrics = parse_vtm_log("\n".join(run_logs), str(bin_path))
+        self._write_metrics_csv(metrics_path, metrics)
+        self._write_report_txt(
+            report_path=report_path,
+            execution_id=ex["id"],
+            mode_code=mode_code,
+            video=ex["video"],
+            qp=ex["qp"],
+            main_cfg=main_cfg,
+            sequence_cfg=ex["cfg"],
+            input_yuv=ex["yuv"],
+            output_bin=str(bin_path),
+            frames=cfg.encode_frames,
+            command=command,
+            metrics=metrics,
+            log_lines=run_logs,
+        )
+
+        ex["modes"][mode_code]["bin"] = str(bin_path)
+        ex["modes"][mode_code]["trace"] = str(trace_path)
+        ex["modes"][mode_code]["report"] = str(report_path)
+        ex["modes"][mode_code]["metrics_csv"] = str(metrics_path)
+        ex["modes"][mode_code]["metrics"] = metrics
+
+        self._advance_unit()
+        self._stage_task_complete(task_id)
+        self._log(f"  ✅ {prefix} {bin_path.name} ({metrics.get('size', '-')})")
         return True
 
     # ==================================================================
@@ -569,73 +656,110 @@ class WorkflowOrchestrator(QThread):
         cfg = self._cfg
         self._stage_started("Decode")
 
-        for ex in executions:
-            if self._cancelled:
+        tasks: list[tuple[dict, str]] = [
+            (ex, mode_code)
+            for ex in executions
+            for mode_code in cfg.encode_modes
+        ]
+        if not tasks:
+            self._stage_finished("Decode", True)
+            return True
+
+        # Verify every input bitstream exists before submitting tasks.
+        for ex, mode_code in tasks:
+            bin_path = ex["modes"][mode_code].get("bin")
+            if not bin_path or not Path(bin_path).is_file():
+                self._log(
+                    f"❌ No bitstream available for decode of {ex['id']} [{mode_code}]"
+                )
+                self._stage_finished("Decode", False)
                 return False
 
-            for mode_code in cfg.encode_modes:
-                if self._cancelled:
-                    return False
+        self._stage_begin(len(tasks))
+        self._log(
+            f"  Running {len(tasks)} decode task(s) "
+            f"with up to {self._max_parallel()} parallel job(s)."
+        )
 
-                mode = MODE_INFO[mode_code]
-                bin_path = ex["modes"][mode_code].get("bin")
-                if not bin_path or not Path(bin_path).is_file():
-                    self._log(
-                        f"❌ No bitstream available for decode of {ex['id']} [{mode_code}]"
-                    )
-                    self._stage_finished("Decode", False)
-                    return False
+        def runner(idx: int, task: tuple[dict, str]) -> bool:
+            if self._cancelled:
+                return False
+            ex, mode_code = task
+            return self._decode_one(root, ex, mode_code, task_index=idx, task_count=len(tasks))
 
-                exec_dir = root / "decode" / mode["folder"] / ex["id"]
-                exec_dir.mkdir(parents=True, exist_ok=True)
-                rec_path = exec_dir / "reconstructed.yuv"
-                metrics_path = exec_dir / "metrics.csv"
-
-                command = [cfg.decoder_exe, "-b", bin_path, "-o", str(rec_path)]
-
-                self._log(
-                    f"\n── Decode {ex['id']} [{mode_code}] {ex['video']} qp={ex['qp']} ──"
-                )
-
-                run_logs: list[str] = []
-
-                def _on_line(line: str) -> None:
-                    run_logs.append(line)
-
-                max_poc = [0]
-
-                def _progress(line: str) -> Optional[int]:
-                    match = re.match(r"POC\s+(\d+)", line)
-                    if match:
-                        max_poc[0] = max(max_poc[0], int(match.group(1)) + 1)
-                        return min(int(math.log2(max_poc[0] + 1) * 10), 95)
-                    return None
-
-                ok = self._run_command(
-                    command,
-                    label=f"dec-{mode_code}",
-                    parse_progress=_progress,
-                    line_capture=_on_line,
-                )
-                if not ok:
-                    if not self._cancelled:
-                        self._log(f"❌ Decode failed for {ex['id']} [{mode_code}]")
-                    self._stage_finished("Decode", False)
-                    return False
-                if self._cancelled:
-                    return False
-
-                metrics = parse_vtm_log("\n".join(run_logs), str(rec_path))
-                self._write_metrics_csv(metrics_path, metrics)
-
-                ex["modes"][mode_code]["reconstructed"] = str(rec_path)
-                ex["modes"][mode_code]["decode_metrics"] = str(metrics_path)
-                ex["modes"][mode_code]["decode_metrics_data"] = metrics
-
-                self._advance_unit()
-                self._log(f"  ✅ {rec_path.name}")
+        success, _ = self._run_parallel(tasks, runner)
+        if not success:
+            if not self._cancelled:
+                self._log("❌ Decode stage finished with failures.")
+            self._stage_finished("Decode", False)
+            return False
 
         self._stage_finished("Decode", True)
+        return True
+
+    def _decode_one(
+        self,
+        root: Path,
+        ex: dict,
+        mode_code: str,
+        task_index: int,
+        task_count: int,
+    ) -> bool:
+        cfg = self._cfg
+        mode = MODE_INFO[mode_code]
+        bin_path = ex["modes"][mode_code].get("bin")
+
+        exec_dir = root / "decode" / mode["folder"] / ex["id"]
+        exec_dir.mkdir(parents=True, exist_ok=True)
+        rec_path = exec_dir / "reconstructed.yuv"
+        metrics_path = exec_dir / "metrics.csv"
+
+        task_id = f"dec-{task_index:03d}"
+        prefix = f"[{task_index + 1}/{task_count} dec-{mode_code} {ex['id']}]"
+        self._log(
+            f"\n── Decode {prefix} {ex['video']} qp={ex['qp']} ──"
+        )
+
+        command = [cfg.decoder_exe, "-b", bin_path, "-o", str(rec_path)]
+
+        run_logs: list[str] = []
+
+        def _on_line(line: str) -> None:
+            run_logs.append(line)
+
+        max_poc = [0]
+
+        def _progress(line: str) -> Optional[int]:
+            match = re.match(r"POC\s+(\d+)", line)
+            if match:
+                max_poc[0] = max(max_poc[0], int(match.group(1)) + 1)
+                return min(int(math.log2(max_poc[0] + 1) * 10), 95)
+            return None
+
+        ok = self._run_command(
+            command,
+            label=f"dec-{mode_code} {ex['id']}",
+            parse_progress=_progress,
+            line_capture=_on_line,
+            on_progress=lambda pct, _id=task_id: self._stage_set_task_progress(_id, pct),
+        )
+        if not ok:
+            if not self._cancelled:
+                self._log(f"❌ {prefix} decode failed.")
+            return False
+        if self._cancelled:
+            return False
+
+        metrics = parse_vtm_log("\n".join(run_logs), str(rec_path))
+        self._write_metrics_csv(metrics_path, metrics)
+
+        ex["modes"][mode_code]["reconstructed"] = str(rec_path)
+        ex["modes"][mode_code]["decode_metrics"] = str(metrics_path)
+        ex["modes"][mode_code]["decode_metrics_data"] = metrics
+
+        self._advance_unit()
+        self._stage_task_complete(task_id)
+        self._log(f"  ✅ {prefix} {rec_path.name}")
         return True
 
     # ==================================================================
@@ -653,74 +777,107 @@ class WorkflowOrchestrator(QThread):
         self._stage_started("Variance Maps")
         n_frames = max(2, min(cfg.variance_frames, MAX_VARIANCE_FRAMES))
 
+        # Validate prerequisites and metadata up-front.
         for ex in executions:
-            if self._cancelled:
-                return False
-
-            ld_yuv = ex["modes"]["LD"].get("reconstructed")
-            ra_yuv = ex["modes"]["RA"].get("reconstructed")
-            if not ld_yuv or not ra_yuv:
+            if not ex["modes"]["LD"].get("reconstructed") or not ex["modes"]["RA"].get("reconstructed"):
                 self._log(
                     f"❌ Cannot compute variance for {ex['id']}: missing decoded YUV."
                 )
                 self._stage_finished("Variance Maps", False)
                 return False
-
-            meta = self._sequence_meta.get(ex["video"])
-            if not meta:
+            if not self._sequence_meta.get(ex["video"]):
                 self._log(
                     f"❌ Missing sequence metadata for {ex['video']} (resolution/bitdepth)."
                 )
                 self._stage_finished("Variance Maps", False)
                 return False
 
-            self._log(
-                f"\n── Variance Maps {ex['id']} {ex['video']} qp={ex['qp']} "
-                f"({meta['width']}×{meta['height']}, frames={n_frames}) ──"
-            )
+        if not executions:
+            self._stage_finished("Variance Maps", True)
+            return True
 
-            try:
-                rows = self._compute_variance_rows(
-                    original_yuv=ex["yuv"],
-                    decoded_ld=ld_yuv,
-                    decoded_ra=ra_yuv,
-                    width=meta["width"],
-                    height=meta["height"],
-                    bitdepth=meta["bitdepth"],
-                    frames=n_frames,
-                )
-            except Exception as exc:  # pylint: disable=broad-except
-                self._log(f"❌ Variance computation failed: {exc}")
-                self._stage_finished("Variance Maps", False)
-                return False
+        self._stage_begin(len(executions))
+        self._log(
+            f"  Running {len(executions)} variance task(s) "
+            f"with up to {self._max_parallel()} parallel job(s)."
+        )
 
+        def runner(idx: int, ex: dict) -> bool:
             if self._cancelled:
                 return False
-
-            df = pd.DataFrame(
-                rows,
-                columns=[
-                    "Frame", "xCU", "yCU", "depth",
-                    "block_variance", "diff_variance_RA", "diff_variance_LD",
-                ],
+            return self._variance_one(
+                root, ex, n_frames=n_frames,
+                task_index=idx, task_count=len(executions),
             )
 
-            for mode_code in ("LD", "RA"):
-                mode = MODE_INFO[mode_code]
-                target_dir = root / "variance_maps" / mode["folder"] / ex["id"]
-                target_dir.mkdir(parents=True, exist_ok=True)
-                target_csv = target_dir / "variance.csv"
-                df.to_csv(target_csv, index=False)
-                ex["modes"][mode_code]["variance_csv"] = str(target_csv)
-
-            self._advance_unit()
-            self._log(f"  ✅ {len(rows):,} rows × 2 mode folders")
+        success, _ = self._run_parallel(executions, runner)
+        if not success:
+            if not self._cancelled:
+                self._log("❌ Variance Maps stage finished with failures.")
+            self._stage_finished("Variance Maps", False)
+            return False
 
         self._stage_finished("Variance Maps", True)
         return True
 
+    def _variance_one(
+        self,
+        root: Path,
+        ex: dict,
+        n_frames: int,
+        task_index: int,
+        task_count: int,
+    ) -> bool:
+        meta = self._sequence_meta[ex["video"]]
+        task_id = f"var-{task_index:03d}"
+        prefix = f"[{task_index + 1}/{task_count} var {ex['id']}]"
+        self._log(
+            f"\n── Variance Maps {prefix} {ex['video']} qp={ex['qp']} "
+            f"({meta['width']}×{meta['height']}, frames={n_frames}) ──"
+        )
+
+        try:
+            rows = self._compute_variance_rows(
+                task_id=task_id,
+                original_yuv=ex["yuv"],
+                decoded_ld=ex["modes"]["LD"]["reconstructed"],
+                decoded_ra=ex["modes"]["RA"]["reconstructed"],
+                width=meta["width"],
+                height=meta["height"],
+                bitdepth=meta["bitdepth"],
+                frames=n_frames,
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            self._log(f"❌ {prefix} variance computation failed: {exc}")
+            return False
+
+        if self._cancelled:
+            return False
+
+        df = pd.DataFrame(
+            rows,
+            columns=[
+                "Frame", "xCU", "yCU", "depth",
+                "block_variance", "diff_variance_RA", "diff_variance_LD",
+            ],
+        )
+
+        for mode_code in ("LD", "RA"):
+            mode = MODE_INFO[mode_code]
+            target_dir = root / "variance_maps" / mode["folder"] / ex["id"]
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target_csv = target_dir / "variance.csv"
+            df.to_csv(target_csv, index=False)
+            ex["modes"][mode_code]["variance_csv"] = str(target_csv)
+
+        self._advance_unit()
+        self._stage_task_complete(task_id)
+        self._log(f"  ✅ {prefix} {len(rows):,} rows × 2 mode folders")
+        return True
+
     def _compute_variance_rows(
         self,
+        task_id: str,
         original_yuv: str,
         decoded_ld: str,
         decoded_ra: str,
@@ -766,7 +923,7 @@ class WorkflowOrchestrator(QThread):
             for bs in BLOCK_SIZES:
                 all_rows.extend(_variance_rows(curr, ref_ld, ref_ra, bs, frame_idx, width, height))
 
-            self.signals.progress_step.emit(int((step + 1) / n_process * 100))
+            self._stage_set_task_progress(task_id, int((step + 1) / n_process * 100))
 
         return all_rows
 
@@ -1080,7 +1237,7 @@ class WorkflowOrchestrator(QThread):
     def _stage_started(self, name: str) -> None:
         self._log(f"\n========== Stage: {name} ==========")
         self.signals.stage_started.emit(name)
-        self.signals.progress_step.emit(0)
+        self._stage_begin(0)
 
     def _stage_finished(self, name: str, ok: bool) -> None:
         self.signals.stage_finished.emit(name, ok)
@@ -1088,28 +1245,108 @@ class WorkflowOrchestrator(QThread):
         self._log(f"========== Stage finished: {name} ({'OK' if ok else 'FAIL'}) ==========")
 
     def _advance_unit(self) -> None:
-        self._done_units = min(self._done_units + 1, self._total_units)
-        self._emit_overall(int(self._done_units / max(1, self._total_units) * 100))
-        self.signals.progress_step.emit(100)
+        with self._units_lock:
+            self._done_units = min(self._done_units + 1, self._total_units)
+            done = self._done_units
+            total = max(1, self._total_units)
+        self._emit_overall(int(done / total * 100))
 
     def _emit_overall(self, value: int) -> None:
         self.signals.progress_overall.emit(max(0, min(100, value)))
 
     def _log(self, line: str) -> None:
+        # QObject signal emissions are inherently thread-safe across QThreads.
         self.signals.log_line.emit(line)
+
+    # ------------------------------------------------------------------
+    # Stage-level progress + parallel runner
+    # ------------------------------------------------------------------
+
+    def _stage_begin(self, total_tasks: int) -> None:
+        with self._stage_lock:
+            self._stage_task_progress.clear()
+            self._stage_task_total = max(0, total_tasks)
+        self.signals.progress_step.emit(0)
+
+    def _stage_set_task_progress(self, task_id: str, value: int) -> None:
+        value = max(0, min(100, int(value)))
+        with self._stage_lock:
+            self._stage_task_progress[task_id] = value
+            total_tasks = max(1, self._stage_task_total)
+            stage_pct = sum(self._stage_task_progress.values()) / total_tasks
+        self.signals.progress_step.emit(int(min(100, stage_pct)))
+
+    def _stage_task_complete(self, task_id: str) -> None:
+        # Pin the task at 100 so it stays in the average.
+        self._stage_set_task_progress(task_id, 100)
+
+    def _max_parallel(self) -> int:
+        return max(1, int(self._cfg.parallel_jobs))
+
+    def _run_parallel(
+        self,
+        items: list,
+        runner: Callable[[int, object], bool],
+    ) -> tuple[bool, list[bool]]:
+        """
+        Execute ``runner(idx, item)`` for every item using a thread pool of
+        size ``parallel_jobs``. Returns (all_succeeded, per_item_success).
+        Cancellation is honoured: pending futures are cancelled, in-flight
+        ones notice via terminated subprocesses or cancelled flag.
+        """
+        if not items:
+            return True, []
+
+        max_workers = self._max_parallel()
+        results: list[bool] = [False] * len(items)
+        succeeded = True
+
+        executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="vtm-wf")
+        try:
+            futures = {
+                executor.submit(_run_safely, runner, idx, item): idx
+                for idx, item in enumerate(items)
+            }
+            for fut in as_completed(futures):
+                idx = futures[fut]
+                try:
+                    ok = fut.result()
+                except Exception as exc:  # pylint: disable=broad-except
+                    self._log(f"❌ Worker raised an exception: {exc}")
+                    ok = False
+                results[idx] = ok
+                if not ok:
+                    succeeded = False
+        finally:
+            # Cancel pending futures; running workers exit on their own once
+            # their subprocesses are terminated by ``cancel()``.
+            executor.shutdown(wait=True, cancel_futures=True)
+
+        if self._cancelled:
+            succeeded = False
+        return succeeded, results
 
     def _run_command(
         self,
         cmd: list[str],
         label: str,
-        parse_progress=None,
-        line_capture=None,
+        parse_progress: Optional[Callable[[str], Optional[int]]] = None,
+        line_capture: Optional[Callable[[str], None]] = None,
+        on_progress: Optional[Callable[[int], None]] = None,
     ) -> bool:
-        """Run a command, streaming stdout to the log and updating step progress."""
+        """
+        Run a command synchronously, streaming stdout to the log.
+
+        Designed to be safe for concurrent use — every invocation registers
+        its Popen in ``self._processes`` so ``cancel()`` can terminate every
+        in-flight worker. ``on_progress`` (when provided) receives 0..100
+        values parsed by ``parse_progress`` so the caller can aggregate
+        per-task progress across parallel workers.
+        """
         self._log(f"▶ [{label}] {subprocess.list2cmdline(cmd)}")
 
         try:
-            self._process = subprocess.Popen(
+            process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -1127,14 +1364,26 @@ class WorkflowOrchestrator(QThread):
             self._log(f"❌ Could not start process: {exc}")
             return False
 
+        proc_id = next(self._proc_seq)
+        with self._processes_lock:
+            self._processes[proc_id] = process
+
         try:
-            for raw in iter(self._process.stdout.readline, ""):
+            # If cancellation arrived before we registered the process,
+            # terminate immediately.
+            if self._cancelled:
+                try:
+                    process.terminate()
+                except OSError:
+                    pass
+
+            for raw in iter(process.stdout.readline, ""):
                 if self._cancelled:
                     try:
-                        self._process.terminate()
+                        process.terminate()
                     except OSError:
                         pass
-                    self._log("⛔ Cancelled by user.")
+                    self._log(f"⛔ [{label}] cancelled by user.")
                     break
 
                 line = raw.rstrip("\r\n")
@@ -1144,15 +1393,19 @@ class WorkflowOrchestrator(QThread):
 
                 if parse_progress is not None:
                     pct = parse_progress(line)
-                    if pct is not None:
-                        self.signals.progress_step.emit(min(100, max(0, pct)))
+                    if pct is not None and on_progress is not None:
+                        on_progress(min(100, max(0, pct)))
         finally:
             try:
-                self._process.stdout.close()
+                process.stdout.close()
             except Exception:  # pylint: disable=broad-except
                 pass
-            return_code = self._process.wait() if self._process else 1
-            self._process = None
+            try:
+                return_code = process.wait()
+            except Exception:  # pylint: disable=broad-except
+                return_code = 1
+            with self._processes_lock:
+                self._processes.pop(proc_id, None)
 
         if self._cancelled:
             return False

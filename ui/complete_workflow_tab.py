@@ -92,6 +92,7 @@ class CompleteWorkflowTab(QWidget):
         body_layout.addWidget(self._build_converter_group())
         body_layout.addWidget(self._build_encoder_group())
         body_layout.addWidget(self._build_variance_group())
+        body_layout.addWidget(self._build_parallel_group())
         body_layout.addLayout(self._build_action_row())
 
         # Stage-level progress (per-step), shown above the LogPanel which has
@@ -324,6 +325,40 @@ class CompleteWorkflowTab(QWidget):
 
         return group
 
+    def _build_parallel_group(self) -> QGroupBox:
+        group = QGroupBox("Parallel Execution")
+        layout = QVBoxLayout(group)
+        layout.setSpacing(8)
+
+        row = QHBoxLayout()
+        lbl = QLabel("Parallel Jobs:")
+        lbl.setMinimumWidth(160)
+        lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(lbl)
+
+        self._parallel_spin = ScrollSafeSpinBox()
+        self._parallel_spin.setRange(1, 32)
+        self._parallel_spin.setValue(2)
+        self._parallel_spin.setToolTip(
+            "Maximum number of independent stage tasks running in parallel.\n"
+            "Applies to Converter, Encode, Decode and Variance Maps.\n"
+            "The Create Dataset stage is always sequential and waits until all "
+            "previous stages have finished for every execution."
+        )
+        row.addWidget(self._parallel_spin)
+        row.addStretch()
+        layout.addLayout(row)
+
+        hint = QLabel(
+            "All stages except Create Dataset run multiple executions in parallel "
+            "up to this limit. Create Dataset always waits until every other stage "
+            "has finished for all executions."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #8a90a4; font-size: 11px;")
+        layout.addWidget(hint)
+        return group
+
     def _build_stage_progress_group(self) -> QGroupBox:
         group = QGroupBox("Stage Progress")
         layout = QVBoxLayout(group)
@@ -398,6 +433,11 @@ class CompleteWorkflowTab(QWidget):
         except (TypeError, ValueError):
             self._variance_frames_spin.setValue(33)
 
+        try:
+            self._parallel_spin.setValue(max(1, int(cfg.get("workflow_parallel_jobs", 2))))
+        except (TypeError, ValueError):
+            self._parallel_spin.setValue(2)
+
         self._step_converter.setChecked(bool(cfg.get("workflow_step_converter", True)))
         self._step_encode.setChecked(bool(cfg.get("workflow_step_encode", True)))
         self._step_decode.setChecked(bool(cfg.get("workflow_step_decode", True)))
@@ -415,6 +455,7 @@ class CompleteWorkflowTab(QWidget):
             "workflow_qps":              self._qps_edit.text(),
             "workflow_encode_frames":    self._encode_frames_spin.value(),
             "workflow_variance_frames":  self._variance_frames_spin.value(),
+            "workflow_parallel_jobs":    self._parallel_spin.value(),
             "workflow_step_converter":   self._step_converter.isChecked(),
             "workflow_step_encode":      self._step_encode.isChecked(),
             "workflow_step_decode":      self._step_decode.isChecked(),
@@ -692,6 +733,7 @@ class CompleteWorkflowTab(QWidget):
             encode_modes=modes,
             encode_frames=int(self._encode_frames_spin.value()),
             variance_frames=int(self._variance_frames_spin.value()),
+            parallel_jobs=max(1, int(self._parallel_spin.value())),
         )
         return True, "", config
 
@@ -718,6 +760,22 @@ class CompleteWorkflowTab(QWidget):
         self._remove_btn.setEnabled(not running and self._inputs_list.currentRow() >= 0)
         self._clear_btn.setEnabled(not running and bool(self._inputs))
 
+        # Settings stay editable when idle, frozen while running.
+        self._parallel_spin.setEnabled(not running)
+        self._convert_all_check.setEnabled(not running)
+        self._convert_limit_spin.setEnabled(not running and not self._convert_all_check.isChecked())
+        self._encode_frames_spin.setEnabled(not running)
+        self._variance_frames_spin.setEnabled(not running)
+        self._mode_ld_check.setEnabled(not running)
+        self._mode_ra_check.setEnabled(not running)
+        self._qps_edit.setEnabled(not running)
+        self._level_edit.setEnabled(not running)
+        for cb in (
+            self._step_converter, self._step_encode, self._step_decode,
+            self._step_variance, self._step_dataset,
+        ):
+            cb.setEnabled(not running)
+
     @Slot()
     def _on_start(self) -> None:
         if self._is_running():
@@ -742,6 +800,7 @@ class CompleteWorkflowTab(QWidget):
                 f"  Modes:         {', '.join(cfg.encode_modes) or '-'}\n"
                 f"  Executions:    {n_exec} (per mode)\n"
                 f"  Encode frames: {cfg.encode_frames}\n"
+                f"  Parallel jobs: {cfg.parallel_jobs}\n"
                 f"  Stages:        {self._stage_summary(cfg.steps)}\n\n"
                 f"Output root: {cfg.output_root}"
             ),
