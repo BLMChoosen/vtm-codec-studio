@@ -139,7 +139,7 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._decoder_tab,      "📼  Decoder")
         self._tabs.addTab(self._converter_tab,    "🔁  Converter")
         self._tabs.addTab(self._variance_maps_tab, "📊  Variance Maps")
-        self._tabs.addTab(self._dataset_tab,      "🗄  Criar Dataset")
+        self._tabs.addTab(self._dataset_tab,      "🗄  Create Dataset")
         layout.addWidget(self._tabs, stretch=1)
 
         self.setCentralWidget(central)
