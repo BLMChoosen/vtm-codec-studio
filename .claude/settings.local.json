@@ -9,7 +9,11 @@
       "Bash(.venv/Scripts/python -c \"from core.variance_maps import VarianceMapsWorker, VarianceJob; from ui.variance_maps_tab import VarianceMapsTab; print\\('OK'\\)\")",
       "Bash(.venv/Scripts/pip list *)",
       "Bash(.venv/Scripts/pip install *)",
-      "Bash(.venv\\\\Scripts\\\\python.exe -c \"import py_compile; py_compile.compile\\('core/dataset_builder.py', doraise=True\\); print\\('core/dataset_builder.py OK'\\)\")"
+      "Bash(.venv\\\\Scripts\\\\python.exe -c \"import py_compile; py_compile.compile\\('core/dataset_builder.py', doraise=True\\); print\\('core/dataset_builder.py OK'\\)\")",
+      "Bash(python -m py_compile core/workflow.py)",
+      "Bash(python -m py_compile ui/complete_workflow_tab.py)",
+      "Bash(python -m py_compile ui/main_window.py)",
+      "Bash(python -c ' *)"
     ]
   }
 }
