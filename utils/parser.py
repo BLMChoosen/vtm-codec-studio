@@ -112,5 +112,72 @@ def parse_vtm_log(log_text: str, output_bin: str) -> dict:
     if os.path.exists(output_bin):
         size_bytes = os.path.getsize(output_bin)
         metrics["size"] = f"{size_bytes / 1024:.2f} KB"
-        
+
     return metrics
+
+
+def parse_time_profile(log_text: str) -> dict:
+    """
+    Parse the encoder's appended Time Profile block plus the Total Time line.
+
+    Expected (values vary, scientific notation allowed):
+
+        Total Time:     6972.455 sec. [user]     6972.975 sec. [elapsed]
+        ...
+         Time Profile
+        Stage;Time(ms)
+        QT_0;86864
+        QT_1;206711
+        QT_2;1.34315e+06
+        INTER;2.24679e+06
+        ENCODER;6.97303e+06
+        End time profile
+
+    Returns a dict:
+        {
+            "stages": {"QT_0": 86864.0, ...},   # milliseconds, in file order
+            "total_user_s": 6972.455 | None,    # seconds
+            "total_elapsed_s": 6972.975 | None, # seconds
+        }
+    """
+    result: dict = {"stages": {}, "total_user_s": None, "total_elapsed_s": None}
+
+    # Total Time with explicit [user]/[elapsed] markers (modified encoders).
+    m = re.search(
+        r"Total Time:\s*([0-9.]+)\s*sec\.?\s*\[user\]\s*([0-9.]+)\s*sec\.?\s*\[elapsed\]",
+        log_text,
+        re.IGNORECASE,
+    )
+    if m:
+        result["total_user_s"] = float(m.group(1))
+        result["total_elapsed_s"] = float(m.group(2))
+    else:
+        # Fallback to the classic single-value VTM format.
+        m2 = re.search(r"Total Time:\s*([0-9.]+)\s*sec", log_text, re.IGNORECASE)
+        if m2:
+            result["total_user_s"] = float(m2.group(1))
+            result["total_elapsed_s"] = float(m2.group(1))
+
+    # Time Profile block — collect "Stage;Time(ms)" pairs in encounter order.
+    stages: dict[str, float] = {}
+    in_block = False
+    for raw in log_text.splitlines():
+        line = raw.strip()
+        if not in_block:
+            if line.lower() == "time profile":
+                in_block = True
+            continue
+        if line.lower() == "end time profile":
+            break
+        if not line or ";" not in line:
+            continue
+        name, _, value = line.partition(";")
+        name = name.strip()
+        if name.lower() == "stage":  # header row "Stage;Time(ms)"
+            continue
+        try:
+            stages[name] = float(value.strip())
+        except ValueError:
+            continue
+    result["stages"] = stages
+    return result

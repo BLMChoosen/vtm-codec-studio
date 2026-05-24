@@ -13,7 +13,10 @@
       "Bash(python -m py_compile core/workflow.py)",
       "Bash(python -m py_compile ui/complete_workflow_tab.py)",
       "Bash(python -m py_compile ui/main_window.py)",
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "Bash(.venv/Scripts/python.exe -m py_compile core/comparison.py ui/comparison_tab.py utils/parser.py ui/main_window.py)",
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "Bash(QT_QPA_PLATFORM=offscreen PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -c ' *)"
     ]
   }
 }

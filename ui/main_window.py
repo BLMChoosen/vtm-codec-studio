@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ui.comparison_tab import ComparisonTab
 from ui.complete_workflow_tab import CompleteWorkflowTab
 from ui.dataset_tab import DatasetTab
 from ui.decoder_tab import DecoderTab
@@ -135,6 +136,7 @@ class MainWindow(QMainWindow):
         self._converter_tab = ConverterTab()
         self._variance_maps_tab = VarianceMapsTab()
         self._dataset_tab = DatasetTab()
+        self._comparison_tab = ComparisonTab()
         self._workflow_tab = CompleteWorkflowTab()
 
         self._tabs.addTab(self._encoder_tab,      "🎬  Encoder")
@@ -142,6 +144,7 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._converter_tab,    "🔁  Converter")
         self._tabs.addTab(self._variance_maps_tab, "📊  Variance Maps")
         self._tabs.addTab(self._dataset_tab,      "🗄  Create Dataset")
+        self._tabs.addTab(self._comparison_tab,   "⚖  Comparison")
         self._tabs.addTab(self._workflow_tab,     "🚀  Complete Workflow")
         layout.addWidget(self._tabs, stretch=1)
 
