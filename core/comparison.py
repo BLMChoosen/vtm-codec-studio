@@ -26,7 +26,9 @@ from __future__ import annotations
 import csv
 import itertools
 import re
+import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -36,6 +38,7 @@ from typing import Callable, Optional
 
 from PySide6.QtCore import QObject, QThread, Signal
 
+from core.dataset_builder import parse_sequence_cfg
 from utils.parser import parse_time_profile
 
 
@@ -136,6 +139,12 @@ class ComparisonOrchestrator(QThread):
         self._progress_lock = threading.Lock()
         self._total_tasks = 1
 
+        # Frame area per video (drives the lightest→heaviest ordering).
+        self._video_area: dict[str, float] = {}
+        # Modified main cfgs for the optimized encoder (inject EncoderConfig : LD/RA).
+        self._opt_main_cfg: dict[str, str] = {}
+        self._tmp_cfg_dir: Optional[Path] = None
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -162,6 +171,19 @@ class ComparisonOrchestrator(QThread):
             root = Path(cfg.output_root)
             root.mkdir(parents=True, exist_ok=True)
 
+            # Resolution per video drives the lightest→heaviest ordering.
+            for video in cfg.videos:
+                self._video_area[video.name] = self._compute_area(video)
+
+            # The optimized encoder needs 'EncoderConfig : LD/RA' injected into its
+            # main config. Work on a throwaway copy so the original cfg is untouched.
+            self._tmp_cfg_dir = Path(tempfile.mkdtemp(prefix="vtm_cmp_cfg_"))
+            for code in cfg.configs:
+                original = self._resolve_main_cfg(CONFIG_INFO[code]["cfg_file"])
+                self._opt_main_cfg[code] = self._make_optimized_cfg(
+                    original, CONFIG_INFO[code]["short"], self._tmp_cfg_dir
+                )
+
             tasks = self._build_tasks()
             self._total_tasks = max(1, len(tasks))
 
@@ -173,6 +195,9 @@ class ComparisonOrchestrator(QThread):
             self._log(f"Output root: {root}")
             mode = "sequential" if cfg.parallel_jobs == 1 else "PARALLEL — measured times may be skewed by CPU contention"
             self._log(f"Parallel jobs: {cfg.parallel_jobs} ({mode})")
+            self._log("Encode order: lightest → heaviest (resolution asc, then QP desc).")
+            for code in cfg.configs:
+                self._log(f"  Optimized [{code}] uses: {self._opt_main_cfg[code]}")
 
             if not self._run_all(tasks):
                 self._finish(False, "Cancelled" if self._cancelled else "One or more encodes failed")
@@ -191,6 +216,8 @@ class ComparisonOrchestrator(QThread):
         except Exception as exc:  # pylint: disable=broad-except
             self._log(f"❌ Unexpected error: {exc}")
             self._finish(False, str(exc))
+        finally:
+            self._cleanup_tmp()
 
     # ------------------------------------------------------------------
     # Task planning + execution
@@ -205,6 +232,14 @@ class ComparisonOrchestrator(QThread):
                     for qp in cfg.qps:
                         for rep in range(cfg.repetitions):
                             tasks.append(_Task(video, exe_label, config, qp, rep))
+
+        # Always encode lightest first: lower resolution, then higher QP.
+        # Remaining keys keep the order deterministic regardless of queue order.
+        tasks.sort(key=lambda t: (
+            self._video_area.get(t.video.name, float("inf")),
+            -t.qp,
+            t.video.name, t.exe_label, t.config, t.rep,
+        ))
         return tasks
 
     def _run_all(self, tasks: list[_Task]) -> bool:
@@ -247,7 +282,10 @@ class ComparisonOrchestrator(QThread):
         bin_path = rep_dir / f"{stem}.bin"
         report_path = rep_dir / f"{stem}.report"
 
-        main_cfg = self._resolve_main_cfg(info["cfg_file"])
+        if task.exe_label == "optimized" and task.config in self._opt_main_cfg:
+            main_cfg = self._opt_main_cfg[task.config]
+        else:
+            main_cfg = self._resolve_main_cfg(info["cfg_file"])
         exe = cfg.exe_for(task.exe_label)
 
         command = [exe, "-c", main_cfg]
@@ -467,6 +505,59 @@ class ComparisonOrchestrator(QThread):
         if self._cfg.cfg_folder:
             return str(Path(self._cfg.cfg_folder) / cfg_filename)
         return cfg_filename
+
+    def _compute_area(self, video: ComparisonVideo) -> float:
+        """Return the video's frame area (w*h); inf when it cannot be read."""
+        if video.sequence_cfg:
+            try:
+                w, h, _ = parse_sequence_cfg(video.sequence_cfg)
+                return float(w * h)
+            except Exception as exc:  # pylint: disable=broad-except
+                self._log(f"⚠ Could not read resolution for {video.name}: {exc}")
+        return float("inf")
+
+    def _make_optimized_cfg(self, original_cfg: str, tag: str, dest_dir: Path) -> str:
+        """
+        Copy *original_cfg* and inject 'EncoderConfig : <tag>' (LD or RA).
+
+        The injected line is never the last one — the file always ends with an
+        empty line, as required by the optimized encoder.
+        """
+        src = Path(original_cfg)
+        try:
+            text = src.read_text(encoding="utf-8", errors="ignore")
+        except OSError as exc:
+            self._log(f"⚠ Could not read {src} for the optimized copy: {exc}")
+            text = ""
+
+        lines = text.splitlines()
+        while lines and not lines[-1].strip():
+            lines.pop()
+
+        new_line = f"EncoderConfig{' ' * 17}: {tag}"
+        key_re = re.compile(r"^\s*EncoderConfig\s*:", re.IGNORECASE)
+        for i, line in enumerate(lines):
+            if key_re.match(line):
+                lines[i] = new_line
+                break
+        else:
+            lines.append(new_line)
+
+        # Always finish with an empty last line.
+        content = "\n".join(lines) + "\n\n"
+
+        dest = dest_dir / f"opt_{tag}_{src.name or 'config.cfg'}"
+        try:
+            dest.write_text(content, encoding="utf-8")
+        except OSError as exc:
+            self._log(f"⚠ Could not write optimized cfg {dest}: {exc}")
+            return original_cfg  # fall back to the unmodified config
+        return str(dest)
+
+    def _cleanup_tmp(self) -> None:
+        if self._tmp_cfg_dir and self._tmp_cfg_dir.exists():
+            shutil.rmtree(self._tmp_cfg_dir, ignore_errors=True)
+        self._tmp_cfg_dir = None
 
     def _set_task_progress(self, task_id: str, value: int) -> None:
         value = max(0, min(100, int(value)))
