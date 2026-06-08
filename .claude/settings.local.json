@@ -16,7 +16,13 @@
       "Bash(python -c ' *)",
       "Bash(.venv/Scripts/python.exe -m py_compile core/comparison.py ui/comparison_tab.py utils/parser.py ui/main_window.py)",
       "Bash(.venv/Scripts/python.exe -c ' *)",
-      "Bash(QT_QPA_PLATFORM=offscreen PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -c ' *)"
+      "Bash(QT_QPA_PLATFORM=offscreen PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -c ' *)",
+      "Bash(python -m pip install matplotlib)",
+      "Bash(python /tmp/verify_ui.py)",
+      "Bash(PYTHONIOENCODING=utf-8 python /tmp/verify_ui.py)",
+      "Bash(python -m py_compile core/analysis.py ui/analysis_tab.py ui/main_window.py)",
+      "Bash(QT_QPA_PLATFORM=offscreen PYTHONIOENCODING=utf-8 python -c ' *)",
+      "Bash(python -m py_compile ui/analysis_tab.py)"
     ]
   }
 }
