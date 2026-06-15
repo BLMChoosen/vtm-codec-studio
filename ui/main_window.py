@@ -5,7 +5,7 @@ The root application window containing the tab interface,
 menu bar, status bar, and global actions.
 """
 
-from PySide6.QtCore import QSize, Qt, Slot
+from PySide6.QtCore import QSize, Qt, QTimer, Slot
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import (
     QApplication,
@@ -31,6 +31,14 @@ from ui.variance_maps_tab import VarianceMapsTab
 from ui.settings_dialog import SettingsDialog
 from ui.theme import ACCENT, BG_DARK
 from utils.config import ConfigManager
+from utils.session import (
+    acquire_lock,
+    clear_all_sessions,
+    load_tab_session,
+    recovery_job_count,
+    release_lock,
+    was_crashed,
+)
 
 
 class MainWindow(QMainWindow):
@@ -43,6 +51,10 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self._config = ConfigManager()
+
+        # Crash detection: check BEFORE acquiring the new lock
+        self._crashed = was_crashed()
+        acquire_lock()
 
         self.setWindowTitle("VTM Codec Studio")
         self.setMinimumSize(QSize(960, 700))
@@ -62,6 +74,9 @@ class MainWindow(QMainWindow):
         self._build_central()
         self._build_status_bar()
         self.showMaximized()
+
+        if self._crashed:
+            QTimer.singleShot(300, self._check_crash_recovery)
 
     # ------------------------------------------------------------------
     # Construction helpers
@@ -211,14 +226,63 @@ class MainWindow(QMainWindow):
             current._input_picker.set_path(filepath)
 
     # ------------------------------------------------------------------
+    # Crash recovery
+    # ------------------------------------------------------------------
+
+    @Slot()
+    def _check_crash_recovery(self) -> None:
+        """Show a recovery dialog when the previous session ended unexpectedly."""
+        sessions: dict[str, dict] = {}
+        for tab_name in ("encoder", "decoder", "converter"):
+            data = load_tab_session(tab_name)
+            if data and recovery_job_count(data) > 0:
+                sessions[tab_name] = data
+
+        if not sessions:
+            clear_all_sessions()
+            return
+
+        label_map = {"encoder": "Encoder", "decoder": "Decoder", "converter": "Converter"}
+        lines = []
+        for tab_name, data in sessions.items():
+            count = recovery_job_count(data)
+            lines.append(f"  • {label_map[tab_name]}: {count} job(s) interrompido(s)")
+
+        msg = (
+            "O aplicativo foi encerrado inesperadamente na sessão anterior.\n\n"
+            "Jobs que estavam em execução foram detectados:\n"
+            + "\n".join(lines)
+            + "\n\nDeseja retomar a codificação?\n\n"
+            "Os arquivos de saída parciais serão deletados e os jobs serão reiniciados do zero."
+        )
+
+        reply = QMessageBox.question(
+            self,
+            "Recuperar sessão anterior",
+            msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            if "encoder" in sessions:
+                self._encoder_tab.restore_session(sessions["encoder"])
+            if "decoder" in sessions:
+                self._decoder_tab.restore_session(sessions["decoder"])
+            if "converter" in sessions:
+                self._converter_tab.restore_session(sessions["converter"])
+        else:
+            clear_all_sessions()
+
+    # ------------------------------------------------------------------
     # Window lifecycle
     # ------------------------------------------------------------------
 
     def closeEvent(self, event) -> None:
-        """Save window geometry on close."""
+        """Save window geometry and release the session lock on clean exit."""
         geo = self.geometry()
         self._config.set("window_geometry", {
             "x": geo.x(), "y": geo.y(),
             "w": geo.width(), "h": geo.height(),
         })
+        release_lock()
         super().closeEvent(event)

@@ -51,6 +51,7 @@ from utils.validators import (
     validate_positive_int,
     validate_qp,
 )
+from utils.session import save_tab_session, clear_tab_session
 
 
 # The three standard VTM encoder configurations
@@ -531,6 +532,40 @@ class EncoderTab(QWidget):
             "encoder_artifacts_dir": self._artifacts_dir_picker.path(),
             "encoder_parallel_jobs": self._parallel_spin.value(),
         })
+
+    # ------------------------------------------------------------------
+    # Crash recovery
+    # ------------------------------------------------------------------
+
+    def _save_session(self) -> None:
+        """Persist current queue state so it can be recovered after a crash."""
+        in_progress = list(self._worker_job_index.values())
+        save_tab_session("encoder", self._queue, in_progress, self._queue_next_index)
+
+    def restore_session(self, session_data: dict) -> None:
+        """Rebuild the queue from *session_data*, deleting any partial outputs."""
+        queue_raw = session_data.get("queue", [])
+        in_progress = set(session_data.get("in_progress_indices", []))
+        next_index = session_data.get("next_index", 0)
+
+        jobs: list[EncodeJob] = []
+        for i, job_data in enumerate(queue_raw):
+            if i not in in_progress and i < next_index:
+                continue  # job completed successfully — skip
+
+            job = EncodeJob(**job_data)
+            # Delete any partial output file left by the interrupted process
+            output_path = Path(job.output_bin)
+            if output_path.exists():
+                try:
+                    output_path.unlink()
+                except OSError:
+                    pass
+            jobs.append(job)
+
+        self._queue = jobs
+        self._refresh_queue_view()
+        clear_tab_session("encoder")
 
     # ------------------------------------------------------------------
     # Validation
@@ -1096,6 +1131,7 @@ class EncoderTab(QWidget):
             ),
             "#ffc857",
         )
+        self._save_session()
         self._set_running(True)
         self._launch_more_queue_jobs()
 
@@ -1116,6 +1152,7 @@ class EncoderTab(QWidget):
             self._log.set_progress(100)
 
         self._log.set_status(status, color)
+        clear_tab_session("encoder")
         self._queue.clear()
         self._refresh_queue_view()
 
@@ -1165,6 +1202,7 @@ class EncoderTab(QWidget):
         if worker not in self._workers:
             return
         self._update_running_status()
+        self._save_session()
 
     def _on_finished(self, worker: EncoderWorker, success: bool, message: str) -> None:
         job = self._workers.get(worker)
@@ -1192,6 +1230,7 @@ class EncoderTab(QWidget):
 
             self._cleanup_worker_state(worker)
             self._update_overall_progress()
+            self._save_session()
 
             if self._queue_cancel_requested:
                 if not self._workers:

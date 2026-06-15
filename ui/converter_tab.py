@@ -32,6 +32,7 @@ from utils.validators import (
     validate_file_exists,
     validate_output_path,
 )
+from utils.session import save_tab_session, clear_tab_session
 
 
 @dataclass
@@ -418,6 +419,44 @@ class ConverterTab(QWidget):
             self._queue.clear()
             self._refresh_queue_view()
 
+    # ------------------------------------------------------------------
+    # Crash recovery
+    # ------------------------------------------------------------------
+
+    def _save_session(self) -> None:
+        """Persist current queue state so it can be recovered after a crash."""
+        in_progress = list(self._worker_job_index.values())
+        save_tab_session("converter", self._queue, in_progress, self._queue_next_index)
+
+    def restore_session(self, session_data: dict) -> None:
+        """Rebuild the queue from *session_data*, deleting any partial outputs."""
+        queue_raw = session_data.get("queue", [])
+        in_progress = set(session_data.get("in_progress_indices", []))
+        next_index = session_data.get("next_index", 0)
+
+        jobs: list[ConvertJob] = []
+        for i, job_data in enumerate(queue_raw):
+            if i not in in_progress and i < next_index:
+                continue  # completed — skip
+
+            job = ConvertJob(**job_data)
+            for path_key in ("output_yuv", "sequence_cfg_output"):
+                out = Path(job_data.get(path_key, ""))
+                if out.exists():
+                    try:
+                        out.unlink()
+                    except OSError:
+                        pass
+            jobs.append(job)
+
+        self._queue = jobs
+        self._refresh_queue_view()
+        clear_tab_session("converter")
+
+    # ------------------------------------------------------------------
+    # Queue execution
+    # ------------------------------------------------------------------
+
     @Slot()
     def _start_queue(self) -> None:
         if self._is_busy():
@@ -453,6 +492,7 @@ class ConverterTab(QWidget):
             f"Starting queue ({self._queue_total} jobs, max {self._max_parallel_jobs()} parallel)…",
             "#ffc857",
         )
+        self._save_session()
         self._set_running(True)
         self._launch_more_queue_jobs()
 
@@ -504,6 +544,7 @@ class ConverterTab(QWidget):
             self._log.set_progress(100)
 
         self._log.set_status(status, color)
+        clear_tab_session("converter")
         self._queue.clear()
         self._refresh_queue_view()
 
@@ -534,6 +575,7 @@ class ConverterTab(QWidget):
         if worker not in self._workers:
             return
         self._update_running_status()
+        self._save_session()
 
     def _handle_log_line(self, worker: ConverterWorker, line: str) -> None:
         queue_index = self._worker_job_index.get(worker, -1)
@@ -564,6 +606,7 @@ class ConverterTab(QWidget):
 
             self._cleanup_worker_state(worker)
             self._update_overall_progress()
+            self._save_session()
 
             if self._queue_cancel_requested:
                 if not self._workers:
