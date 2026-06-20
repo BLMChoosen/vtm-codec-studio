@@ -325,13 +325,14 @@ class CatchUpTab(QWidget):
         self._table.setColumnWidth(3, 90)
         self._table.setColumnWidth(4, 40)
         self._table.setColumnWidth(5, 40)
+        self._table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         layout.addWidget(self._table)
 
         legend_row = QHBoxLayout()
         for color, text in [
             (_COL_TEXT_GOOD, "■  Complete"),
             (_COL_TEXT_WARN, "■  Incomplete"),
-            (_COL_TEXT_ERR,  "■  YUV/CFG missing"),
+            (_COL_TEXT_ERR,  "■  YUV/CFG missing  (double-click to set manually)"),
         ]:
             lbl = QLabel(text)
             lbl.setStyleSheet(f"color: {color.name()}; font-size: 11px;")
@@ -458,48 +459,58 @@ class CatchUpTab(QWidget):
         for result in self._scan_results:
             row = self._table.rowCount()
             self._table.insertRow(row)
-
-            n_missing     = len(result.missing) + len(result.interrupted)
-            total         = result.total_count
-            complete      = result.complete_count
-            has_source    = result.can_encode
-            needs_work    = result.needs_work
-
-            if not needs_work:
-                bg     = _COL_COMPLETE
-                status = "Complete"
-                fg     = _COL_TEXT_GOOD
-            elif not has_source and needs_work:
-                bg     = _COL_NO_SOURCE
-                status = "No source"
-                fg     = _COL_TEXT_ERR
-            else:
-                bg     = _COL_PARTIAL
-                status = "Incomplete"
-                fg     = _COL_TEXT_WARN
-
-            def _cell(text: str, align=Qt.AlignmentFlag.AlignLeft) -> QTableWidgetItem:
-                item = QTableWidgetItem(str(text))
-                item.setBackground(bg)
-                item.setForeground(fg)
-                item.setTextAlignment(align | Qt.AlignmentFlag.AlignVCenter)
-                return item
-
-            self._table.setItem(row, 0, _cell(result.info.cls, Qt.AlignmentFlag.AlignCenter))
-            self._table.setItem(row, 1, _cell(result.info.display))
-            self._table.setItem(row, 2, _cell(status, Qt.AlignmentFlag.AlignCenter))
-            self._table.setItem(row, 3, _cell(
-                f"{n_missing} / {total}" if needs_work else "—",
-                Qt.AlignmentFlag.AlignCenter,
-            ))
-            self._table.setItem(row, 4, _cell(
-                "✔" if result.yuv_path else "✘", Qt.AlignmentFlag.AlignCenter,
-            ))
-            self._table.setItem(row, 5, _cell(
-                "✔" if result.seq_cfg else "✘", Qt.AlignmentFlag.AlignCenter,
-            ))
-
+            self._fill_table_row(row, result)
         self._table.resizeRowsToContents()
+
+    def _fill_table_row(self, row: int, result: SeqScanResult) -> None:
+        n_missing  = len(result.missing) + len(result.interrupted)
+        total      = result.total_count
+        needs_work = result.needs_work
+        has_source = result.can_encode
+
+        if not needs_work:
+            bg     = _COL_COMPLETE
+            status = "Complete"
+            fg     = _COL_TEXT_GOOD
+            tip    = ""
+        elif not has_source:
+            bg     = _COL_NO_SOURCE
+            status = "No source"
+            fg     = _COL_TEXT_ERR
+            missing_parts = []
+            if not result.yuv_path:
+                missing_parts.append(".yuv")
+            if not result.seq_cfg:
+                missing_parts.append("seq .cfg")
+            tip = f"Double-click to set {' and '.join(missing_parts)} manually"
+        else:
+            bg     = _COL_PARTIAL
+            status = "Incomplete"
+            fg     = _COL_TEXT_WARN
+            tip    = ""
+
+        def _cell(text: str, align=Qt.AlignmentFlag.AlignLeft) -> QTableWidgetItem:
+            item = QTableWidgetItem(str(text))
+            item.setBackground(bg)
+            item.setForeground(fg)
+            item.setTextAlignment(align | Qt.AlignmentFlag.AlignVCenter)
+            if tip:
+                item.setToolTip(tip)
+            return item
+
+        self._table.setItem(row, 0, _cell(result.info.cls, Qt.AlignmentFlag.AlignCenter))
+        self._table.setItem(row, 1, _cell(result.info.display))
+        self._table.setItem(row, 2, _cell(status, Qt.AlignmentFlag.AlignCenter))
+        self._table.setItem(row, 3, _cell(
+            f"{n_missing} / {total}" if needs_work else "—",
+            Qt.AlignmentFlag.AlignCenter,
+        ))
+        self._table.setItem(row, 4, _cell(
+            "✔" if result.yuv_path else "✘", Qt.AlignmentFlag.AlignCenter,
+        ))
+        self._table.setItem(row, 5, _cell(
+            "✔" if result.seq_cfg else "✘", Qt.AlignmentFlag.AlignCenter,
+        ))
 
     # ------------------------------------------------------------------
     # Validation helpers
@@ -617,6 +628,44 @@ class CatchUpTab(QWidget):
     # ------------------------------------------------------------------
     # Slots
     # ------------------------------------------------------------------
+
+    @Slot(int, int)
+    def _on_cell_double_clicked(self, row: int, col: int) -> None:
+        if self._is_running() or row >= len(self._scan_results):
+            return
+        result = self._scan_results[row]
+        if result.can_encode:
+            return  # only red (no-source) rows need manual assignment
+
+        changed = False
+        start_yuv = self._yuv_picker.path() or ""
+        start_cfg = self._seq_cfg_picker.path() or ""
+
+        if not result.yuv_path:
+            yuv_file, _ = QFileDialog.getOpenFileName(
+                self,
+                f"Select YUV for  {result.info.display}",
+                start_yuv,
+                "YUV Files (*.yuv);;All Files (*)",
+            )
+            if yuv_file:
+                result.yuv_path = yuv_file
+                changed = True
+
+        if not result.seq_cfg:
+            cfg_file, _ = QFileDialog.getOpenFileName(
+                self,
+                f"Select seq .cfg for  {result.info.display}",
+                start_cfg,
+                "Config Files (*.cfg);;All Files (*)",
+            )
+            if cfg_file:
+                result.seq_cfg = cfg_file
+                changed = True
+
+        if changed:
+            self._fill_table_row(row, result)
+            self._update_buttons()
 
     @Slot()
     def _on_start(self) -> None:
