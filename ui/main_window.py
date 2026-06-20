@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from ui.analysis_tab import AnalysisTab
+from ui.catchup_tab import CatchUpTab
 from ui.comparison_tab import ComparisonTab
 from ui.complete_workflow_tab import CompleteWorkflowTab
 from ui.dataset_tab import DatasetTab
@@ -153,6 +154,7 @@ class MainWindow(QMainWindow):
         self._variance_maps_tab = VarianceMapsTab()
         self._dataset_tab = DatasetTab()
         self._comparison_tab = ComparisonTab()
+        self._catchup_tab = CatchUpTab()
         self._analysis_tab = AnalysisTab()
         self._workflow_tab = CompleteWorkflowTab()
 
@@ -162,6 +164,7 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._variance_maps_tab, "📊  Variance Maps")
         self._tabs.addTab(self._dataset_tab,      "🗄  Create Dataset")
         self._tabs.addTab(self._comparison_tab,   "⚖  Comparison")
+        self._tabs.addTab(self._catchup_tab,      "🔧  Catch-Up [temp]")
         self._tabs.addTab(self._analysis_tab,     "📈  Analysis")
         self._tabs.addTab(self._workflow_tab,     "🚀  Complete Workflow")
         layout.addWidget(self._tabs, stretch=1)
